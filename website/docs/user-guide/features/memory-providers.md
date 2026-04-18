@@ -36,7 +36,7 @@ When a memory provider is active, Hermes automatically:
 5. **Mirrors built-in memory writes** to the external provider
 6. **Adds provider-specific tools** so the agent can search, store, and manage memories
 
-The built-in memory (MEMORY.md / USER.md) continues to work exactly as before. The external provider is additive.
+The built-in memory (MEMORY.md / USER.md) continues to work exactly as before by default. If you want an external provider such as LightRAG to be the only durable memory backend, disable `memory.memory_enabled` and `memory.user_profile_enabled` in `config.yaml`.
 
 ## Available Providers
 

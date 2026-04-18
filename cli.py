@@ -1682,6 +1682,7 @@ class HermesCLI:
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
         # show_reasoning: display model thinking/reasoning before the response
         self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", False)
+        self.reply_usage_footer_enabled = False
         # busy_input_mode: "interrupt" (Enter interrupts current run) or "queue" (Enter queues for next turn)
         _bim = CLI_CONFIG["display"].get("busy_input_mode", "interrupt")
         self.busy_input_mode = "queue" if str(_bim).strip().lower() == "queue" else "interrupt"
@@ -5664,6 +5665,8 @@ class HermesCLI:
             self._toggle_yolo()
         elif canonical == "reasoning":
             self._handle_reasoning_command(cmd_original)
+        elif canonical == "usagefooter":
+            self._handle_usagefooter_command(cmd_original)
         elif canonical == "fast":
             self._handle_fast_command(cmd_original)
         elif canonical == "compress":
@@ -5963,15 +5966,23 @@ class HermesCLI:
                             self._app.invalidate()
 
                 bg_agent.thinking_callback = _bg_thinking
-
-                result = bg_agent.run_conversation(
-                    user_message=prompt,
-                    task_id=task_id,
+                from agent.reply_usage_footer import (
+                    append_reply_usage_footer,
+                    run_with_usage_tracking,
+                )
+                result, _footer = run_with_usage_tracking(
+                    bg_agent,
+                    lambda: bg_agent.run_conversation(
+                        user_message=prompt,
+                        task_id=task_id,
+                    ),
+                    enabled=self.reply_usage_footer_enabled,
                 )
 
                 response = result.get("final_response", "") if result else ""
                 if not response and result and result.get("error"):
                     response = f"Error: {result['error']}"
+                display_response = append_reply_usage_footer(response, _footer)
 
                 # Display result in the CLI (thread-safe via patch_stdout).
                 # Force a TUI refresh first so spinner/status bar don't overlap
@@ -5985,7 +5996,7 @@ class HermesCLI:
                 _cprint(f"  ✅ Background task #{task_num} complete")
                 _cprint(f"  Prompt: \"{prompt[:60]}{'...' if len(prompt) > 60 else ''}\"")
                 ChatConsole().print(f"[{_accent_hex()}]{'─' * 40}[/]")
-                if response:
+                if display_response:
                     try:
                         from hermes_cli.skin_engine import get_active_skin
                         _skin = get_active_skin()
@@ -5999,7 +6010,7 @@ class HermesCLI:
 
                     _chat_console = ChatConsole()
                     _chat_console.print(Panel(
-                        _rich_text_from_ansi(response),
+                        _rich_text_from_ansi(display_response),
                         title=f"[{_resp_color} bold]{label} (background #{task_num})[/]",
                         title_align="left",
                         border_style=_resp_color,
@@ -6099,15 +6110,24 @@ class HermesCLI:
                     "context. No tools available. Be direct and concise.]\n\n"
                     + question
                 )
-                result = btw_agent.run_conversation(
-                    user_message=btw_prompt,
-                    conversation_history=history_snapshot,
-                    task_id=task_id,
+                from agent.reply_usage_footer import (
+                    append_reply_usage_footer,
+                    run_with_usage_tracking,
+                )
+                result, _footer = run_with_usage_tracking(
+                    btw_agent,
+                    lambda: btw_agent.run_conversation(
+                        user_message=btw_prompt,
+                        conversation_history=history_snapshot,
+                        task_id=task_id,
+                    ),
+                    enabled=self.reply_usage_footer_enabled,
                 )
 
                 response = (result.get("final_response") or "") if result else ""
                 if not response and result and result.get("error"):
                     response = f"Error: {result['error']}"
+                display_response = append_reply_usage_footer(response, _footer)
 
                 # TUI refresh before printing
                 if self._app:
@@ -6115,7 +6135,7 @@ class HermesCLI:
                     time.sleep(0.05)
                 print()
 
-                if response:
+                if display_response:
                     try:
                         from hermes_cli.skin_engine import get_active_skin
                         _skin = get_active_skin()
@@ -6124,7 +6144,7 @@ class HermesCLI:
                         _resp_color = "#4F6D4A"
 
                     ChatConsole().print(Panel(
-                        _rich_text_from_ansi(response),
+                        _rich_text_from_ansi(display_response),
                         title=f"[{_resp_color} bold]⚕ /btw[/]",
                         title_align="left",
                         border_style=_resp_color,
@@ -6562,6 +6582,31 @@ class HermesCLI:
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (saved to config){_RST}")
         else:
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (session only){_RST}")
+
+    def _handle_usagefooter_command(self, cmd: str):
+        """Handle /usagefooter — show or toggle the per-reply usage footer."""
+        parts = cmd.strip().split(maxsplit=1)
+        arg = parts[1].strip().lower() if len(parts) > 1 else "status"
+
+        if arg == "status":
+            state = "on ✓" if self.reply_usage_footer_enabled else "off"
+            _cprint(f"  {_ACCENT}Reply usage footer: {state}{_RST}")
+            _cprint(f"  {_DIM}Usage: /usagefooter <on|off|status>{_RST}")
+            return
+
+        if arg == "on":
+            self.reply_usage_footer_enabled = True
+            _cprint(f"  {_ACCENT}✓ Reply usage footer: ON{_RST}")
+            _cprint(f"  {_DIM}  Per-reply token/cache/reasoning stats will be appended after each response.{_RST}")
+            return
+
+        if arg == "off":
+            self.reply_usage_footer_enabled = False
+            _cprint(f"  {_ACCENT}✓ Reply usage footer: OFF{_RST}")
+            return
+
+        _cprint(f"  {_DIM}(._.) Unknown argument: {arg}{_RST}")
+        _cprint(f"  {_DIM}Usage: /usagefooter <on|off|status>{_RST}")
 
     def _on_reasoning(self, reasoning_text: str):
         """Callback for intermediate reasoning display during tool-call loops."""
@@ -7996,6 +8041,12 @@ class HermesCLI:
                     "[Voice input — respond concisely and conversationally, "
                     "2-3 sentences max. No code blocks or markdown.] "
                 )
+            _history_len_before_run = len(self.conversation_history[:-1])
+            from agent.reply_usage_footer import (
+                capture_usage_snapshot,
+                compute_usage_footer,
+            )
+            _usage_before = capture_usage_snapshot(self.agent)
 
             def run_agent():
                 nonlocal result
@@ -8104,6 +8155,18 @@ class HermesCLI:
                 # Normal completion: agent thread should be done already,
                 # but guard against edge cases.
                 agent_thread.join(timeout=30)
+            _usage_after = capture_usage_snapshot(self.agent)
+            _current_turn_messages = []
+            if result:
+                _all_messages = result.get("messages", []) or []
+                if _history_len_before_run < len(_all_messages):
+                    _current_turn_messages = _all_messages[_history_len_before_run:]
+                else:
+                    _current_turn_messages = _all_messages
+            reply_footer = compute_usage_footer(
+                _usage_before, self.agent, _current_turn_messages,
+                enabled=self.reply_usage_footer_enabled,
+            )
 
             # Proactively clean up async clients whose event loop is dead.
             # The agent thread may have created AsyncOpenAI clients bound
@@ -8217,14 +8280,18 @@ class HermesCLI:
                     # Text was already printed sentence-by-sentence; just close the box
                     w = shutil.get_terminal_size().columns
                     _cprint(f"\n{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
+                    if reply_footer:
+                        _cprint(f"\n{reply_footer}")
                 elif already_streamed:
                     # Response was already streamed token-by-token with box framing;
                     # _flush_stream() already closed the box. Skip Rich Panel.
-                    pass
+                    if reply_footer:
+                        _cprint(f"\n{reply_footer}")
                 else:
+                    display_response = append_reply_usage_footer(response, reply_footer)
                     _chat_console = ChatConsole()
                     _chat_console.print(Panel(
-                        _rich_text_from_ansi(response),
+                        _rich_text_from_ansi(display_response),
                         title=f"[{_resp_color} bold]{label}[/]",
                         title_align="left",
                         border_style=_resp_color,
@@ -8232,6 +8299,8 @@ class HermesCLI:
                         box=rich_box.HORIZONTALS,
                         padding=(1, 4),
                     ))
+            elif reply_footer and not response_previewed:
+                _cprint(f"\n{reply_footer}")
 
 
             # Play terminal bell when agent finishes (if enabled).

@@ -24,6 +24,7 @@ def _make_runner():
     runner = GatewayRunner.__new__(GatewayRunner)
     runner._agent_cache = {}
     runner._agent_cache_lock = threading.Lock()
+    runner._cleanup_agent_resources = MagicMock()
     return runner
 
 
@@ -97,6 +98,26 @@ class TestAgentConfigSignature:
         sig1 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
         sig2 = GatewayRunner._agent_config_signature("claude-sonnet-4", runtime, ["hermes-telegram"], "")
         assert sig1 == sig2
+
+    def test_identity_scope_changes_signature(self):
+        from gateway.run import GatewayRunner
+
+        runtime = {"api_key": "sk-test12345678", "base_url": "https://openrouter.ai/api/v1", "provider": "openrouter"}
+        sig1 = GatewayRunner._agent_config_signature(
+            "claude-sonnet-4",
+            runtime,
+            ["hermes-napcat"],
+            "",
+            identity_scope_signature="napcat:10001",
+        )
+        sig2 = GatewayRunner._agent_config_signature(
+            "claude-sonnet-4",
+            runtime,
+            ["hermes-napcat"],
+            "",
+            identity_scope_signature="napcat:20002",
+        )
+        assert sig1 != sig2
 
 
 class TestAgentCacheLifecycle:
@@ -189,6 +210,30 @@ class TestAgentCacheLifecycle:
         with runner._agent_cache_lock:
             assert "session-A" not in runner._agent_cache
             assert "session-B" in runner._agent_cache
+
+    def test_evict_cached_child_agents_removes_only_matching_subtree(self):
+        runner = _make_runner()
+        with runner._agent_cache_lock:
+            runner._agent_cache["parent"] = ("main-agent", "sig-main")
+            runner._agent_cache["parent::fullagent"] = ("fullagent", "sig-full")
+            runner._agent_cache["parent::child:aaa"] = ("child-a", "sig-a")
+            runner._agent_cache["parent::child:bbb"] = ("child-b", "sig-b")
+            runner._agent_cache["other::child:ccc"] = ("child-c", "sig-c")
+            runner._agent_cache["other::fullagent"] = ("other-fullagent", "sig-other-full")
+
+        runner._evict_cached_child_agents("parent")
+
+        with runner._agent_cache_lock:
+            assert "parent" in runner._agent_cache
+            assert "parent::fullagent" not in runner._agent_cache
+            assert "parent::child:aaa" not in runner._agent_cache
+            assert "parent::child:bbb" not in runner._agent_cache
+            assert "other::child:ccc" in runner._agent_cache
+            assert "other::fullagent" in runner._agent_cache
+        runner._cleanup_agent_resources.assert_any_call("fullagent")
+        runner._cleanup_agent_resources.assert_any_call("child-a")
+        runner._cleanup_agent_resources.assert_any_call("child-b")
+        assert runner._cleanup_agent_resources.call_count == 3
 
     def test_reasoning_config_updates_in_place(self):
         """Reasoning config can be set on a cached agent without eviction."""
@@ -673,13 +718,14 @@ class TestAgentCacheSpilloverLive:
     def _real_agent(self):
         """A genuine AIAgent; no API calls are made during these tests."""
         from run_agent import AIAgent
-        return AIAgent(
-            model="anthropic/claude-sonnet-4", api_key="test",
-            base_url="https://openrouter.ai/api/v1", provider="openrouter",
-            max_iterations=5, quiet_mode=True,
-            skip_context_files=True, skip_memory=True,
-            platform="telegram",
-        )
+        with patch.object(AIAgent, "_check_compression_model_feasibility", lambda self: None):
+            return AIAgent(
+                model="anthropic/claude-sonnet-4", api_key="test",
+                base_url="https://openrouter.ai/api/v1", provider="openrouter",
+                max_iterations=5, quiet_mode=True,
+                skip_context_files=True, skip_memory=True,
+                platform="telegram",
+            )
 
     def test_fill_to_cap_then_spillover(self, monkeypatch):
         """Fill to cap with real agents, insert one more, oldest evicted."""

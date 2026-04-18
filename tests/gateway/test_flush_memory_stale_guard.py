@@ -11,6 +11,7 @@ import sys
 import types
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, call
 
 
@@ -147,6 +148,36 @@ class TestMemoryInjection:
         tmp_agent.run_conversation.assert_called_once()
         flush_prompt = tmp_agent.run_conversation.call_args.kwargs.get("user_message", "")
         assert "current live state of memory" not in flush_prompt
+
+    def test_provider_snapshot_used_when_builtin_memory_disabled(self, monkeypatch):
+        runner, tmp_agent, _ = _make_flush_context(monkeypatch)
+        runner.config = SimpleNamespace(
+            memory={
+                "memory_enabled": False,
+                "user_profile_enabled": False,
+                "provider": "lightrag",
+            },
+            platforms={},
+        )
+
+        fake_manager = MagicMock()
+        fake_manager.build_live_memory_snapshot.return_value = (
+            "## Current USER PROFILE (who the user is):\nAlice prefers concise replies"
+        )
+        fake_provider = MagicMock()
+        fake_provider.is_available.return_value = True
+
+        with (
+            patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "k"}),
+            patch("gateway.run._resolve_gateway_model", return_value="test-model"),
+            patch("agent.memory_manager.MemoryManager", return_value=fake_manager),
+            patch("plugins.memory.load_memory_provider", return_value=fake_provider),
+        ):
+            runner._flush_memories_for_session("session_provider")
+
+        flush_prompt = tmp_agent.run_conversation.call_args.kwargs.get("user_message", "")
+        assert "Alice prefers concise replies" in flush_prompt
+        assert "Do NOT overwrite or remove entries" in flush_prompt
 
 
 class TestFlushAgentSilenced:

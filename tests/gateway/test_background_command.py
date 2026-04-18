@@ -288,6 +288,40 @@ class TestRunBackgroundTask:
         content = call_args[1].get("content", call_args[0][1] if len(call_args[0]) > 1 else "")
         assert "failed" in content.lower()
 
+    @pytest.mark.asyncio
+    async def test_async_runtime_resolution_is_awaited(self):
+        """Background-task runtime resolution may be async in tests and should be awaited."""
+        runner = _make_runner()
+        mock_adapter = AsyncMock()
+        mock_adapter.send = AsyncMock()
+        mock_adapter.extract_media = MagicMock(return_value=([], "Hello from background!"))
+        mock_adapter.extract_images = MagicMock(return_value=([], "Hello from background!"))
+        runner.adapters[Platform.TELEGRAM] = mock_adapter
+        runner._resolve_session_agent_runtime = AsyncMock(
+            return_value=("test-model", {"api_key": "test-key", "provider": "openrouter"})
+        )
+
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            user_id="12345",
+            chat_id="67890",
+            user_name="testuser",
+        )
+
+        mock_result = {"final_response": "Hello from background!", "messages": []}
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_agent_instance = MagicMock()
+            mock_agent_instance.shutdown_memory_provider = MagicMock()
+            mock_agent_instance.close = MagicMock()
+            mock_agent_instance.run_conversation.return_value = mock_result
+            MockAgent.return_value = mock_agent_instance
+
+            await runner._run_background_task("say hello", source, "bg_test")
+
+        runner._resolve_session_agent_runtime.assert_awaited_once()
+        mock_adapter.send.assert_called_once()
+
 
 # ---------------------------------------------------------------------------
 # /background in help and known_commands

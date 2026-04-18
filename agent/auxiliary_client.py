@@ -1744,11 +1744,11 @@ def get_text_auxiliary_client(
     (e.g. auxiliary.compression.model, auxiliary.web_extract.model).
     """
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
-    return resolve_provider_client(
+    return _get_cached_client(
         provider,
         model=model,
-        explicit_base_url=base_url,
-        explicit_api_key=api_key,
+        base_url=base_url,
+        api_key=api_key,
         api_mode=api_mode,
         main_runtime=main_runtime,
     )
@@ -1762,12 +1762,12 @@ def get_async_text_auxiliary_client(task: str = "", *, main_runtime: Optional[Di
     Returns (None, None) when no provider is available.
     """
     provider, model, base_url, api_key, api_mode = _resolve_task_provider_model(task or None)
-    return resolve_provider_client(
+    return _get_cached_client(
         provider,
         model=model,
         async_mode=True,
-        explicit_base_url=base_url,
-        explicit_api_key=api_key,
+        base_url=base_url,
+        api_key=api_key,
         api_mode=api_mode,
         main_runtime=main_runtime,
     )

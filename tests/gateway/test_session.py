@@ -11,6 +11,7 @@ from gateway.session import (
     build_session_context,
     build_session_context_prompt,
     build_session_key,
+    resolve_session_isolation,
 )
 
 
@@ -154,6 +155,12 @@ class TestLocalCliFactory:
         assert source.chat_id == "cli"
         assert source.chat_type == "dm"
         assert source.chat_name == "CLI terminal"
+
+
+class TestSessionStructureGuards:
+    def test_session_module_has_no_napcat_platform_branch(self):
+        src = Path("gateway/session.py").read_text(encoding="utf-8")
+        assert "Platform.NAPCAT" not in src
 
 
 class TestBuildSessionContextPrompt:
@@ -355,6 +362,27 @@ class TestBuildSessionContextPrompt:
 
         assert "**User:** Alice" in prompt
         assert "Multi-user thread" not in prompt
+
+    def test_napcat_shared_group_prompt_does_not_pin_single_user(self):
+        config = GatewayConfig(
+            platforms={
+                Platform.NAPCAT: PlatformConfig(enabled=True, token="fake", extra={}),
+            },
+        )
+        source = SessionSource(
+            platform=Platform.NAPCAT,
+            chat_id="100000001",
+            chat_name="Test Group",
+            chat_type="group",
+            user_id="10001",
+            user_name="Alice",
+        )
+        ctx = build_session_context(source, config)
+        prompt = build_session_context_prompt(ctx)
+
+        assert "Multi-user shared session" in prompt
+        assert "current speaker may change each turn" in prompt
+        assert "**User:** Alice" not in prompt
 
     def test_dm_thread_shows_user_not_multi(self):
         """DM threads are single-user and should show User, not multi-user note."""
@@ -685,6 +713,56 @@ class TestWhatsAppDMSessionKeyConsistency:
         assert second_entry.session_key == "agent:main:discord:group:guild-123"
         assert first_entry.session_id == second_entry.session_id
 
+    def test_napcat_group_sessions_are_shared_by_default(self, store):
+        store.config.platforms[Platform.NAPCAT] = PlatformConfig(
+            enabled=True,
+            extra={"group_sessions_per_user": False},
+        )
+
+        first = SessionSource(
+            platform=Platform.NAPCAT,
+            chat_id="100000001",
+            chat_type="group",
+            user_id="alice",
+            user_name="Alice",
+        )
+        second = SessionSource(
+            platform=Platform.NAPCAT,
+            chat_id="100000001",
+            chat_type="group",
+            user_id="bob",
+            user_name="Bob",
+        )
+
+        first_entry = store.get_or_create_session(first)
+        second_entry = store.get_or_create_session(second)
+
+        assert first_entry.session_key == "agent:main:napcat:group:100000001"
+        assert second_entry.session_key == "agent:main:napcat:group:100000001"
+        assert first_entry.session_id == second_entry.session_id
+
+    def test_napcat_group_sessions_can_opt_back_into_per_user(self, store):
+        store.config.platforms[Platform.NAPCAT] = PlatformConfig(
+            enabled=True,
+            extra={"group_sessions_per_user": True},
+        )
+
+        first = SessionSource(
+            platform=Platform.NAPCAT,
+            chat_id="100000001",
+            chat_type="group",
+            user_id="alice",
+        )
+        second = SessionSource(
+            platform=Platform.NAPCAT,
+            chat_id="100000001",
+            chat_type="group",
+            user_id="bob",
+        )
+
+        assert store._generate_session_key(first) == "agent:main:napcat:group:100000001:alice"
+        assert store._generate_session_key(second) == "agent:main:napcat:group:100000001:bob"
+
     def test_telegram_dm_includes_chat_id(self):
         """Non-WhatsApp DMs should also include chat_id to separate users."""
         source = SessionSource(
@@ -748,6 +826,22 @@ class TestWhatsAppDMSessionKeyConsistency:
 
         assert build_session_key(first, group_sessions_per_user=False) == "agent:main:discord:group:guild-123"
         assert build_session_key(second, group_sessions_per_user=False) == "agent:main:discord:group:guild-123"
+
+    def test_resolve_session_isolation_defaults_napcat_groups_to_shared(self):
+        source = SessionSource(
+            platform=Platform.NAPCAT,
+            chat_id="100000001",
+            chat_type="group",
+            user_id="alice",
+        )
+
+        group_sessions_per_user, thread_sessions_per_user = resolve_session_isolation(
+            source,
+            platform_extra={"group_sessions_per_user": False},
+        )
+
+        assert group_sessions_per_user is False
+        assert thread_sessions_per_user is False
 
     def test_group_thread_includes_thread_id(self):
         """Forum-style threads need a distinct session key within one group."""

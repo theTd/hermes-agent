@@ -26,6 +26,11 @@ import logging
 import threading
 from typing import Dict, Any, List, Optional, Tuple
 
+from agent.tool_event_instrumentation import (
+    begin_tool_event as _begin_tool_event,
+    emit_tool_failure as _emit_tool_failure_event,
+    emit_tool_success as _emit_tool_success_event,
+)
 from tools.registry import discover_builtin_tools, registry
 from toolsets import resolve_toolset, validate_toolset
 
@@ -447,6 +452,12 @@ def handle_function_call(
     # Coerce string arguments to their schema-declared types (e.g. "42"→42)
     function_args = coerce_tool_args(function_name, function_args)
 
+    _tool_event_ctx = _begin_tool_event(
+        function_name,
+        function_args,
+        tool_call_id=tool_call_id,
+    )
+
     try:
         if function_name in _AGENT_LOOP_TOOLS:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
@@ -525,10 +536,17 @@ def handle_function_call(
         except Exception:
             pass
 
+        _emit_tool_success_event(
+            _tool_event_ctx,
+            result,
+            emit_semantic_events=True,
+        )
+
         return result
 
     except Exception as e:
         error_msg = f"Error executing {function_name}: {str(e)}"
+        _emit_tool_failure_event(_tool_event_ctx, e)
         logger.error(error_msg)
         return json.dumps({"error": error_msg}, ensure_ascii=False)
 

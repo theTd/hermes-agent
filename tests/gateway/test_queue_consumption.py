@@ -17,7 +17,9 @@ from gateway.platforms.base import (
     MessageType,
     PlatformConfig,
     Platform,
+    merge_pending_message_event,
 )
+from gateway.session import SessionSource, build_session_key
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +142,31 @@ class TestQueueMessageStorage:
 
         assert adapter.has_pending_interrupt(session_key)
 
+    @pytest.mark.asyncio
+    async def test_active_session_followups_append_in_pending_turn(self):
+        adapter = _StubAdapter()
+        adapter.set_message_handler(lambda event: asyncio.sleep(0, result=None))
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="123",
+            chat_type="dm",
+            user_id="user-1",
+        )
+        session_key = build_session_key(source)
+        adapter._active_sessions[session_key] = asyncio.Event()
+
+        await adapter.handle_message(
+            MessageEvent(text="first", message_type=MessageType.TEXT, source=source, message_id="m1")
+        )
+        await adapter.handle_message(
+            MessageEvent(text="second", message_type=MessageType.TEXT, source=source, message_id="m2")
+        )
+
+        pending = adapter.get_pending_message(session_key)
+        assert pending is not None
+        assert pending.text == "first\nsecond"
+        assert pending.message_id == "m2"
+
 
 class TestQueueConsumptionAfterCompletion:
     """Verify that pending messages are consumed after normal completion."""
@@ -168,8 +195,8 @@ class TestQueueConsumptionAfterCompletion:
         assert retrieved is not None
         assert retrieved.text == "process this after"
 
-    def test_multiple_queues_last_one_wins(self):
-        """If user /queue's multiple times, last message overwrites."""
+    def test_multiple_queues_append_into_single_pending_turn(self):
+        """Multiple queued prompts should append instead of overwriting."""
         adapter = _StubAdapter()
         session_key = "telegram:user:123"
 
@@ -180,7 +207,7 @@ class TestQueueConsumptionAfterCompletion:
                 source=MagicMock(),
                 message_id=f"q-{text}",
             )
-            adapter._pending_messages[session_key] = event
+            merge_pending_message_event(adapter._pending_messages, session_key, event)
 
         retrieved = adapter.get_pending_message(session_key)
-        assert retrieved.text == "third"
+        assert retrieved.text == "first\nsecond\nthird"

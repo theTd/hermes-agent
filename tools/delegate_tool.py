@@ -576,8 +576,15 @@ def _run_single_child(
             exit_reason = "max_iterations"
 
         # Extract token counts (safe for mock objects)
-        _input_tokens = getattr(child, "session_prompt_tokens", 0)
-        _output_tokens = getattr(child, "session_completion_tokens", 0)
+        _input_tokens = getattr(child, "session_input_tokens", None)
+        _output_tokens = getattr(child, "session_output_tokens", None)
+        if not isinstance(_input_tokens, (int, float)):
+            _input_tokens = getattr(child, "session_prompt_tokens", 0)
+        if not isinstance(_output_tokens, (int, float)):
+            _output_tokens = getattr(child, "session_completion_tokens", 0)
+        _cache_read_tokens = getattr(child, "session_cache_read_tokens", 0)
+        _cache_write_tokens = getattr(child, "session_cache_write_tokens", 0)
+        _reasoning_tokens = getattr(child, "session_reasoning_tokens", 0)
         _model = getattr(child, "model", None)
 
         entry: Dict[str, Any] = {
@@ -591,6 +598,15 @@ def _run_single_child(
             "tokens": {
                 "input": _input_tokens if isinstance(_input_tokens, (int, float)) else 0,
                 "output": _output_tokens if isinstance(_output_tokens, (int, float)) else 0,
+                "cache_read": _cache_read_tokens if isinstance(_cache_read_tokens, (int, float)) else 0,
+                "cache_write": _cache_write_tokens if isinstance(_cache_write_tokens, (int, float)) else 0,
+                "reasoning": _reasoning_tokens if isinstance(_reasoning_tokens, (int, float)) else 0,
+                "total": (
+                    (_input_tokens if isinstance(_input_tokens, (int, float)) else 0)
+                    + (_output_tokens if isinstance(_output_tokens, (int, float)) else 0)
+                    + (_cache_read_tokens if isinstance(_cache_read_tokens, (int, float)) else 0)
+                    + (_cache_write_tokens if isinstance(_cache_write_tokens, (int, float)) else 0)
+                ),
             },
             "tool_trace": tool_trace,
         }

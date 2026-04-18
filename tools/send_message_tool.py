@@ -15,6 +15,14 @@ import ssl
 import time
 
 from agent.redact import redact_sensitive_text
+from gateway.platform_helpers import (
+    build_platform_tool_helper,
+    get_helper_one_shot_platform_names,
+    get_tool_platform_names,
+    resolve_tool_platform,
+    uses_helper_one_shot,
+)
+from hermes_constants import display_hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +31,7 @@ _FEISHU_TARGET_RE = re.compile(r"^\s*((?:oc|ou|on|chat|open)_[-A-Za-z0-9]+)(?::(
 _WEIXIN_TARGET_RE = re.compile(r"^\s*((?:wxid|gh|v\d+|wm|wb)_[A-Za-z0-9_-]+|[A-Za-z0-9._-]+@chatroom|filehelper)\s*$")
 # Discord snowflake IDs are numeric, same regex pattern as Telegram topic targets.
 _NUMERIC_TOPIC_RE = _TELEGRAM_TOPIC_TARGET_RE
+_BARE_NUMERIC_TARGET_PLATFORMS = {"telegram", "discord"}
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".3gp"}
 _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".m4a"}
@@ -113,7 +122,7 @@ SEND_MESSAGE_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for Telegram topics and Discord threads. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org'"
+                "description": "Delivery target. Format: 'platform' (uses home channel), 'platform:#channel-name', 'platform:chat_id', or 'platform:chat_id:thread_id' for thread/topic-capable platforms. Examples: 'telegram', 'telegram:-1001234567890:17585', 'discord:999888777:555444333', 'discord:#bot-home', 'slack:#engineering', 'signal:+155****4567', 'matrix:!roomid:server.org', 'matrix:@user:server.org'"
             },
             "message": {
                 "type": "string",
@@ -162,13 +171,55 @@ def _handle_send(args):
     else:
         is_explicit = False
 
-    # Resolve human-friendly channel names to numeric IDs
+    from tools.interrupt import is_interrupted
+    if is_interrupted():
+        return tool_error("Interrupted")
+
+    try:
+        from gateway.config import load_gateway_config
+        config = load_gateway_config()
+    except Exception as e:
+        return json.dumps(_error(f"Failed to load gateway config: {e}"))
+
+    platform = resolve_tool_platform(platform_name)
+    if not platform:
+        avail = ", ".join(get_tool_platform_names())
+        return tool_error(f"Unknown platform: {platform_name}. Available: {avail}")
+
+    pconfig = config.platforms.get(platform)
+    if not pconfig or not pconfig.enabled:
+        return tool_error(
+            f"Platform '{platform_name}' is not configured. "
+            f"Set up credentials in {display_hermes_home()}/config.yaml or environment variables."
+        )
+    platform_helper = build_platform_tool_helper(platform, pconfig)
+
     if target_ref and not is_explicit:
         try:
             from gateway.channel_directory import resolve_channel_name
+
             resolved = resolve_channel_name(platform_name, target_ref)
             if resolved:
                 chat_id, thread_id, _ = _parse_target_ref(platform_name, resolved)
+            elif platform_helper is not None:
+                from model_tools import _run_async
+
+                resolve_tool_target = getattr(platform_helper, "resolve_tool_target", None)
+                if not callable(resolve_tool_target):
+                    return json.dumps({
+                        "error": f"Could not resolve '{target_ref}' on {platform_name}. "
+                        f"Use send_message(action='list') to see available targets."
+                    })
+                resolved = _run_async(resolve_tool_target(target_ref))
+                if resolved:
+                    chat_id = resolved.get("chat_id")
+                    thread_id = resolved.get("thread_id")
+                    is_explicit = bool(resolved.get("explicit", True))
+                else:
+                    return json.dumps({
+                        "error": f"Could not resolve '{target_ref}' on {platform_name}. "
+                        f"Use send_message(action='list') to see available targets."
+                    })
             else:
                 return json.dumps({
                     "error": f"Could not resolve '{target_ref}' on {platform_name}. "
@@ -237,11 +288,10 @@ def _handle_send(args):
                 return tool_error(f"Platform '{platform_name}' is not configured. Set up credentials in ~/.hermes/config.yaml or environment variables.")
         else:
             return tool_error(f"Platform '{platform_name}' is not configured. Set up credentials in ~/.hermes/config.yaml or environment variables.")
-
     from gateway.platforms.base import BasePlatformAdapter
 
     media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
-    mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
+    mirror_text = cleaned_message.strip()
 
     used_home_channel = False
     if not chat_id:
@@ -286,8 +336,36 @@ def _handle_send(args):
             try:
                 from gateway.mirror import mirror_to_session
                 from gateway.session_context import get_session_env
-                source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli")
-                if mirror_to_session(platform_name, chat_id, mirror_text, source_label=source_label, thread_id=thread_id):
+                source_label = get_session_env("HERMES_SESSION_PLATFORM", "cli") or "cli"
+                preferred_user_id = get_session_env("HERMES_SESSION_USER_ID", "") or None
+                resolved_session_ids = []
+                if platform_helper is not None:
+                    resolve_mirror_targets = getattr(platform_helper, "resolve_mirror_targets", None)
+                    if callable(resolve_mirror_targets):
+                        resolved_session_ids = list(
+                            resolve_mirror_targets(
+                                chat_id,
+                                thread_id=thread_id,
+                                preferred_user_id=preferred_user_id,
+                            )
+                        )
+                mirror_kwargs = {
+                    "source_label": source_label,
+                    "thread_id": thread_id,
+                    "preferred_user_id": preferred_user_id,
+                    "broadcast": bool(
+                        (platform_helper is not None and str(chat_id or "").strip().lower().startswith("group:"))
+                        or (resolved_session_ids and len(resolved_session_ids) > 1)
+                    ),
+                }
+                if resolved_session_ids:
+                    mirror_kwargs["resolved_session_ids"] = resolved_session_ids
+                if mirror_to_session(
+                    platform_name,
+                    chat_id,
+                    mirror_text,
+                    **mirror_kwargs,
+                ):
                     result["mirrored"] = True
             except Exception:
                 pass
@@ -317,7 +395,7 @@ def _parse_target_ref(platform_name: str, target_ref: str):
         match = _WEIXIN_TARGET_RE.fullmatch(target_ref)
         if match:
             return match.group(1), None, True
-    if target_ref.lstrip("-").isdigit():
+    if platform_name in _BARE_NUMERIC_TARGET_PLATFORMS and target_ref.lstrip("-").isdigit():
         return target_ref, None, True
     # Matrix room IDs (start with !) and user IDs (start with @) are explicit
     if platform_name == "matrix" and (target_ref.startswith("!") or target_ref.startswith("@")):
@@ -342,6 +420,20 @@ def _describe_media_for_mirror(media_files):
             return "[Sent audio attachment]"
         return "[Sent document attachment]"
     return f"[Sent {len(media_files)} media attachments]"
+
+
+def _media_delivery_platform_names() -> list[str]:
+    """Return platform names with native media support in send_message."""
+    supported = ["telegram", "discord", "matrix", "weixin"]
+    for platform_name in get_helper_one_shot_platform_names():
+        if platform_name not in supported:
+            supported.append(platform_name)
+    return supported
+
+
+def _media_delivery_support_text() -> str:
+    """Human-readable list of platforms supporting native send_message media delivery."""
+    return ", ".join(_media_delivery_platform_names())
 
 
 def _get_cron_auto_delivery_target():
@@ -389,7 +481,15 @@ def _maybe_skip_cron_duplicate_send(platform_name: str, chat_id: str, thread_id:
     }
 
 
-async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None):
+async def _send_to_platform(
+    platform,
+    pconfig,
+    chat_id,
+    message,
+    thread_id=None,
+    media_files=None,
+    platform_adapter=None,
+):
     """Route a message to the appropriate platform sender.
 
     Long messages are automatically chunked to fit within platform limits
@@ -416,6 +516,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         _feishu_available = False
 
     media_files = media_files or []
+    if platform_adapter is None:
+        platform_adapter = build_platform_tool_helper(platform, pconfig)
 
     if platform == Platform.SLACK and message:
         try:
@@ -500,11 +602,23 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             last_result = result
         return last_result
 
-    # --- Non-Telegram/Discord platforms ---
+    # --- Helper-managed platforms: delegate one-shot delivery to the adapter helper ---
+    if uses_helper_one_shot(platform):
+        return await _send_via_platform_helper(
+            platform,
+            pconfig,
+            chat_id,
+            message,
+            media_files=media_files,
+            thread_id=thread_id,
+            platform_adapter=platform_adapter,
+        )
+
+    # --- Other platforms fall back to text-only sends ---
     if media_files and not message.strip():
         return {
             "error": (
-                f"send_message MEDIA delivery is currently only supported for telegram, discord, matrix, and weixin; "
+                f"send_message MEDIA delivery is currently only supported for {_media_delivery_support_text()}; "
                 f"target {platform.value} had only media attachments"
             )
         }
@@ -512,7 +626,7 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     if media_files:
         warning = (
             f"MEDIA attachments were omitted for {platform.value}; "
-            "native send_message media delivery is currently only supported for telegram, discord, matrix, and weixin"
+            f"native send_message media delivery is currently only supported for {_media_delivery_support_text()}"
         )
 
     last_result = None
@@ -555,6 +669,30 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         warnings.append(warning)
         last_result["warnings"] = warnings
     return last_result
+
+
+async def _send_via_platform_helper(
+    platform,
+    pconfig,
+    chat_id,
+    message,
+    media_files=None,
+    thread_id=None,
+    platform_adapter=None,
+):
+    """Delegate one-shot sends to a short-lived platform helper adapter."""
+    helper = platform_adapter or build_platform_tool_helper(platform, pconfig)
+    if helper is None:
+        return {"error": f"Direct sending not implemented for {platform.value}"}
+    send_one_shot = getattr(helper, "send_one_shot", None)
+    if not callable(send_one_shot):
+        return {"error": f"Direct sending not implemented for {platform.value}"}
+    return await send_one_shot(
+        chat_id,
+        message,
+        media_files=media_files or [],
+        thread_id=thread_id,
+    )
 
 
 async def _send_telegram(token, chat_id, message, media_files=None, thread_id=None, disable_link_previews=False):

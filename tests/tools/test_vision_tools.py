@@ -315,6 +315,39 @@ class TestErrorLoggingExcInfo:
             assert any(r.exc_info and r.exc_info[0] is not None for r in error_records)
 
     @pytest.mark.asyncio
+    async def test_stream_state_bug_retries_once(self, tmp_path, caplog):
+        """Transient SDK stream-state bugs should retry once before failing."""
+        img = tmp_path / "ok.jpg"
+        img.write_bytes(b"\xff\xd8\xff" + b"\x00" * 16)
+
+        mock_response = MagicMock()
+        mock_choice = MagicMock()
+        mock_choice.message.content = "Recovered after retry"
+        mock_response.choices = [mock_choice]
+
+        with (
+            patch(
+                "tools.vision_tools._image_to_base64_data_url",
+                return_value="data:image/jpeg;base64,abc",
+            ),
+            patch(
+                "tools.vision_tools.async_call_llm",
+                new_callable=AsyncMock,
+                side_effect=[
+                    AttributeError("'NoneType' object has no attribute 'append'"),
+                    mock_response,
+                ],
+            ) as mock_llm,
+            caplog.at_level(logging.WARNING, logger="tools.vision_tools"),
+        ):
+            result = json.loads(await vision_analyze_tool(str(img), "describe this"))
+
+        assert result["success"] is True
+        assert result["analysis"] == "Recovered after retry"
+        assert mock_llm.await_count == 2
+        assert any("retrying once" in record.getMessage().lower() for record in caplog.records)
+
+    @pytest.mark.asyncio
     async def test_cleanup_error_logs_exc_info(self, tmp_path, caplog):
         """Temp file cleanup failure should log warning with exc_info."""
         # Create a real temp file that will be "downloaded"

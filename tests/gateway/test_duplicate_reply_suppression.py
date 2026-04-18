@@ -13,6 +13,7 @@ Covers four fix paths:
 """
 
 import asyncio
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -154,6 +155,35 @@ class TestBaseInterruptSuppression:
         await adapter._process_message_background(event, session_key)
 
         assert any(s["content"] == "Valid response" for s in adapter.sent)
+
+    @pytest.mark.asyncio
+    async def test_pending_followups_are_processed_iteratively_without_recursion(self):
+        """Queued follow-ups should be consumed in a loop, not via recursive awaits."""
+        adapter = StubAdapter()
+        original_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(80)
+        try:
+            total_events = 120
+
+            async def fake_handler(event):
+                index = int(event.text)
+                if index + 1 < total_events:
+                    next_event = _make_event(text=str(index + 1))
+                    adapter._pending_messages[session_key] = next_event
+                return f"handled:{index}"
+
+            adapter.set_message_handler(fake_handler)
+            first_event = _make_event(text="0")
+            session_key = build_session_key(first_event.source)
+
+            await adapter._process_message_background(first_event, session_key)
+
+            handled = [entry["content"] for entry in adapter.sent if entry["content"].startswith("handled:")]
+            assert len(handled) == total_events
+            assert handled[0] == "handled:0"
+            assert handled[-1] == f"handled:{total_events - 1}"
+        finally:
+            sys.setrecursionlimit(original_limit)
 
 
 # Test 2: run.py — partial streamed output must not suppress final send

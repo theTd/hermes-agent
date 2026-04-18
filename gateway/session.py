@@ -152,6 +152,7 @@ class SessionContext:
     source: SessionSource
     connected_platforms: List[Platform]
     home_channels: Dict[Platform, HomeChannel]
+    multi_user_session: bool = False
     
     # Session metadata
     session_key: str = ""
@@ -166,6 +167,7 @@ class SessionContext:
             "home_channels": {
                 p.value: hc.to_dict() for p, hc in self.home_channels.items()
             },
+            "multi_user_session": self.multi_user_session,
             "session_key": self.session_key,
             "session_id": self.session_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -240,19 +242,13 @@ def build_session_context_prompt(
         lines.append(f"**Channel Topic:** {context.source.chat_topic}")
 
     # User identity.
-    # In shared thread sessions (non-DM with thread_id), multiple users
-    # contribute to the same conversation.  Don't pin a single user name
-    # in the system prompt — it changes per-turn and would bust the prompt
-    # cache.  Instead, note that this is a multi-user thread; individual
-    # sender names are prefixed on each user message by the gateway.
-    _is_shared_thread = (
-        context.source.chat_type != "dm"
-        and context.source.thread_id
-    )
-    if _is_shared_thread:
+    # In shared multi-user sessions, don't pin a single user name in the
+    # cached system prompt — the active speaker can change every turn.
+    if context.multi_user_session:
+        session_label = "Multi-user thread" if context.source.thread_id else "Multi-user shared session"
         lines.append(
-            "**Session type:** Multi-user thread — messages are prefixed "
-            "with [sender name]. Multiple users may participate."
+            f"**Session type:** {session_label} — current speaker may change each turn. "
+            "Messages are prefixed with [sender name] when needed."
         )
     elif context.source.user_name:
         lines.append(f"**User:** {context.source.user_name}")
@@ -496,6 +492,49 @@ def build_session_key(
     return ":".join(key_parts)
 
 
+def resolve_session_isolation(
+    source: SessionSource,
+    *,
+    gateway_config: Optional[GatewayConfig] = None,
+    platform_extra: Optional[Dict[str, Any]] = None,
+) -> tuple[bool, bool]:
+    """Resolve per-source session isolation flags.
+
+    Default behavior follows the gateway-level config, with platform-specific
+    overrides from ``platform_extra`` when present.
+    """
+    group_default = getattr(gateway_config, "group_sessions_per_user", True)
+    thread_default = getattr(gateway_config, "thread_sessions_per_user", False)
+
+    extra = platform_extra or {}
+    group_value = extra.get("group_sessions_per_user")
+    thread_value = extra.get("thread_sessions_per_user")
+
+    return bool(group_default if group_value is None else group_value), bool(
+        thread_default if thread_value is None else thread_value
+    )
+
+
+def is_multi_user_session(
+    source: SessionSource,
+    *,
+    gateway_config: Optional[GatewayConfig] = None,
+    platform_extra: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Return True when the session is shared across multiple participants."""
+    if source.chat_type == "dm":
+        return False
+
+    group_sessions_per_user, thread_sessions_per_user = resolve_session_isolation(
+        source,
+        gateway_config=gateway_config,
+        platform_extra=platform_extra,
+    )
+    if source.thread_id:
+        return not thread_sessions_per_user
+    return not group_sessions_per_user
+
+
 class SessionStore:
     """
     Manages session storage and retrieval.
@@ -574,10 +613,21 @@ class SessionStore:
     
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
+        platform_extra = {}
+        try:
+            platform_cfg = getattr(self.config, "platforms", {}).get(source.platform)
+            platform_extra = getattr(platform_cfg, "extra", {}) or {}
+        except Exception:
+            platform_extra = {}
+        group_sessions_per_user, thread_sessions_per_user = resolve_session_isolation(
+            source,
+            gateway_config=self.config,
+            platform_extra=platform_extra,
+        )
         return build_session_key(
             source,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            group_sessions_per_user=group_sessions_per_user,
+            thread_sessions_per_user=thread_sessions_per_user,
         )
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:
@@ -995,7 +1045,13 @@ class SessionStore:
         entries.sort(key=lambda e: e.updated_at, reverse=True)
 
         return entries
-    
+
+    def get_session_entry(self, session_key: str) -> Optional[SessionEntry]:
+        """Return the current session entry for a session key, if present."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            return self._entries.get(session_key)
+
     def get_transcript_path(self, session_id: str) -> Path:
         """Get the path to a session's legacy transcript file."""
         return self.sessions_dir / f"{session_id}.jsonl"
@@ -1127,10 +1183,22 @@ def build_session_context(
         if home:
             home_channels[platform] = home
     
+    platform_extra = {}
+    try:
+        platform_cfg = getattr(config, "platforms", {}).get(source.platform)
+        platform_extra = getattr(platform_cfg, "extra", {}) or {}
+    except Exception:
+        platform_extra = {}
+
     context = SessionContext(
         source=source,
         connected_platforms=connected,
         home_channels=home_channels,
+        multi_user_session=is_multi_user_session(
+            source,
+            gateway_config=config,
+            platform_extra=platform_extra,
+        ),
     )
     
     if session_entry:

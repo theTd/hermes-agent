@@ -206,6 +206,8 @@ _lock = threading.Lock()
 _pending: dict[str, dict] = {}
 _session_approved: dict[str, set] = {}
 _session_yolo: set[str] = set()
+_session_auto_yolo: set[str] = set()
+_session_yolo_disabled: set[str] = set()
 _permanent_approved: set = set()
 
 # =========================================================================
@@ -309,6 +311,7 @@ def enable_session_yolo(session_key: str) -> None:
         return
     with _lock:
         _session_yolo.add(session_key)
+        _session_yolo_disabled.discard(session_key)
 
 
 def disable_session_yolo(session_key: str) -> None:
@@ -317,6 +320,22 @@ def disable_session_yolo(session_key: str) -> None:
         return
     with _lock:
         _session_yolo.discard(session_key)
+        if session_key in _session_auto_yolo:
+            _session_yolo_disabled.add(session_key)
+        else:
+            _session_yolo_disabled.discard(session_key)
+
+
+def set_session_auto_yolo_default(session_key: str, enabled: bool) -> None:
+    """Set whether a session should default to YOLO until explicitly toggled."""
+    if not session_key:
+        return
+    with _lock:
+        if enabled:
+            _session_auto_yolo.add(session_key)
+            return
+        _session_auto_yolo.discard(session_key)
+        _session_yolo_disabled.discard(session_key)
 
 
 def clear_session(session_key: str) -> None:
@@ -335,7 +354,10 @@ def is_session_yolo_enabled(session_key: str) -> bool:
     if not session_key:
         return False
     with _lock:
-        return session_key in _session_yolo
+        return session_key in _session_yolo or (
+            session_key in _session_auto_yolo
+            and session_key not in _session_yolo_disabled
+        )
 
 
 def is_current_session_yolo_enabled() -> bool:
@@ -369,6 +391,19 @@ def load_permanent(patterns: set):
         _permanent_approved.update(patterns)
 
 
+def clear_session(session_key: str):
+    """Clear all approvals and pending requests for a session."""
+    with _lock:
+        _session_approved.pop(session_key, None)
+        _session_yolo.discard(session_key)
+        _session_auto_yolo.discard(session_key)
+        _session_yolo_disabled.discard(session_key)
+        _pending.pop(session_key, None)
+        _gateway_notify_cbs.pop(session_key, None)
+        # Signal ALL blocked threads so they don't hang forever
+        entries = _gateway_queues.pop(session_key, [])
+        for entry in entries:
+            entry.event.set()
 
 # =========================================================================
 # Config persistence for permanent allowlist
@@ -599,7 +634,9 @@ def check_dangerous_command(command: str, env_type: str,
 
     # --yolo: bypass all approval prompts. Gateway /yolo is session-scoped;
     # CLI --yolo remains process-scoped via the env var for local use.
-    if os.getenv("HERMES_YOLO_MODE") or is_current_session_yolo_enabled():
+    is_gateway = os.getenv("HERMES_GATEWAY_SESSION")
+    cli_yolo = bool(os.getenv("HERMES_YOLO_MODE")) and not is_gateway
+    if cli_yolo or is_current_session_yolo_enabled():
         return {"approved": True, "message": None}
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
@@ -702,11 +739,13 @@ def check_all_command_guards(command: str, env_type: str,
     # --yolo or approvals.mode=off: bypass all approval prompts.
     # Gateway /yolo is session-scoped; CLI --yolo remains process-scoped.
     approval_mode = _get_approval_mode()
-    if os.getenv("HERMES_YOLO_MODE") or is_current_session_yolo_enabled() or approval_mode == "off":
+    is_gateway = os.getenv("HERMES_GATEWAY_SESSION")
+    gateway_yolo = is_current_session_yolo_enabled()
+    cli_yolo = bool(os.getenv("HERMES_YOLO_MODE")) and not is_gateway
+    if cli_yolo or gateway_yolo or approval_mode == "off":
         return {"approved": True, "message": None}
 
     is_cli = os.getenv("HERMES_INTERACTIVE")
-    is_gateway = os.getenv("HERMES_GATEWAY_SESSION")
     is_ask = os.getenv("HERMES_EXEC_ASK")
 
     # Preserve the existing non-interactive behavior: outside CLI/gateway/ask
@@ -714,26 +753,33 @@ def check_all_command_guards(command: str, env_type: str,
     if not is_cli and not is_gateway and not is_ask:
         return {"approved": True, "message": None}
 
+    session_key = get_current_session_key()
+    notify_cb = None
+    if is_gateway or is_ask:
+        with _lock:
+            notify_cb = _gateway_notify_cbs.get(session_key)
+
     # --- Phase 1: Gather findings from both checks ---
 
-    # Tirith check — wrapper guarantees no raise for expected failures.
-    # Only catch ImportError (module not installed).
-    tirith_result = {"action": "allow", "findings": [], "summary": ""}
-    try:
-        from tools.tirith_security import check_command_security
-        tirith_result = check_command_security(command)
-    except ImportError:
-        pass  # tirith module not installed — allow
-
-    # Dangerous command check (detection only, no approval)
+    # Dangerous command check is local and fast, so do it first.
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
+
+    # Blocking gateway approvals should reach the user promptly. When a live
+    # callback is registered, skip tirith's first-run resolution/install path
+    # here so dangerous-command prompts are not delayed by external scanner
+    # setup latency. Non-blocking gateway flows still include tirith findings.
+    tirith_result = {"action": "allow", "findings": [], "summary": ""}
+    if not ((is_gateway or is_ask) and notify_cb is not None):
+        try:
+            from tools.tirith_security import check_command_security
+            tirith_result = check_command_security(command)
+        except ImportError:
+            pass  # tirith module not installed — allow
 
     # --- Phase 2: Decide ---
 
     # Collect warnings that need approval
     warnings = []  # list of (pattern_key, description, is_tirith)
-
-    session_key = get_current_session_key()
 
     # Tirith block/warn → approvable warning with rich findings.
     # Previously, tirith "block" was a hard block with no approval prompt.
@@ -794,10 +840,6 @@ def check_all_command_guards(command: str, env_type: str,
     # input() flow.  The agent never sees "approval_required"; it either
     # gets the command output (approved) or a definitive "BLOCKED" message.
     if is_gateway or is_ask:
-        notify_cb = None
-        with _lock:
-            notify_cb = _gateway_notify_cbs.get(session_key)
-
         if notify_cb is not None:
             # --- Blocking gateway approval (queue-based) ---
             # Each call gets its own _ApprovalEntry so parallel subagents

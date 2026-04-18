@@ -111,6 +111,46 @@ class TestFindSessionId:
 
         assert result == "sess_1"
 
+    def test_prefers_matching_user_id_for_shared_group_chat(self, tmp_path):
+        sessions_dir, index_file = _setup_sessions(tmp_path, {
+            "older-preferred": {
+                "session_id": "sess_preferred",
+                "origin": {"platform": "napcat", "chat_id": "100000001", "chat_type": "group", "user_id": "100000002"},
+                "updated_at": "2026-04-13T21:23:28",
+            },
+            "newer-other-user": {
+                "session_id": "sess_other",
+                "origin": {"platform": "napcat", "chat_id": "100000001", "chat_type": "group", "user_id": "100000003"},
+                "updated_at": "2026-04-13T22:00:00",
+            },
+        })
+
+        with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
+             patch.object(mirror_mod, "_SESSIONS_INDEX", index_file):
+            result = _find_session_id("napcat", "100000001", preferred_user_id="100000002")
+
+        assert result == "sess_preferred"
+
+    def test_generic_lookup_does_not_normalize_napcat_prefixed_targets(self, tmp_path):
+        sessions_dir, index_file = _setup_sessions(tmp_path, {
+            "group": {
+                "session_id": "sess_group",
+                "origin": {"platform": "napcat", "chat_id": "12345", "chat_type": "group"},
+                "updated_at": "2026-04-13T21:23:28",
+            },
+            "dm": {
+                "session_id": "sess_dm",
+                "origin": {"platform": "napcat", "chat_id": "12345", "chat_type": "dm"},
+                "updated_at": "2026-04-13T22:00:00",
+            },
+        })
+
+        with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
+             patch.object(mirror_mod, "_SESSIONS_INDEX", index_file):
+            result = _find_session_id("napcat", "group:12345")
+
+        assert result is None
+
 
 class TestAppendToJsonl:
     def test_appends_message(self, tmp_path):
@@ -189,6 +229,66 @@ class TestMirrorToSession:
         assert (sessions_dir / "sess_topic_a.jsonl").exists()
         assert not (sessions_dir / "sess_topic_b.jsonl").exists()
 
+    def test_successful_mirror_prefers_matching_user_session(self, tmp_path):
+        sessions_dir, index_file = _setup_sessions(tmp_path, {
+            "group_user_a": {
+                "session_id": "sess_user_a",
+                "origin": {"platform": "napcat", "chat_id": "100000001", "chat_type": "group", "user_id": "100000002"},
+                "updated_at": "2026-04-13T21:23:28",
+            },
+            "group_user_b": {
+                "session_id": "sess_user_b",
+                "origin": {"platform": "napcat", "chat_id": "100000001", "chat_type": "group", "user_id": "100000003"},
+                "updated_at": "2026-04-13T22:00:00",
+            },
+        })
+
+        with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
+             patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
+             patch("gateway.mirror._append_to_sqlite"):
+            result = mirror_to_session(
+                "napcat",
+                "100000001",
+                "Cross-session test",
+                source_label="napcat",
+                preferred_user_id="100000002",
+            )
+
+        assert result is True
+        assert (sessions_dir / "sess_user_a.jsonl").exists()
+        assert not (sessions_dir / "sess_user_b.jsonl").exists()
+
+    def test_broadcast_mirror_writes_to_all_matching_napcat_group_sessions(self, tmp_path):
+        sessions_dir, index_file = _setup_sessions(tmp_path, {
+            "group_user_a": {
+                "session_id": "sess_user_a",
+                "origin": {"platform": "napcat", "chat_id": "100000001", "chat_type": "group", "user_id": "100000002"},
+                "updated_at": "2026-04-13T21:23:28",
+            },
+            "group_user_b": {
+                "session_id": "sess_user_b",
+                "origin": {"platform": "napcat", "chat_id": "100000001", "chat_type": "group", "user_id": "100000003"},
+                "updated_at": "2026-04-13T22:00:00",
+            },
+        })
+
+        with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
+             patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
+             patch("gateway.mirror._append_to_sqlite"):
+            result = mirror_to_session(
+                "napcat",
+                "group:100000001",
+                "Cross-session test",
+                source_label="napcat",
+                preferred_user_id="100000002",
+                broadcast=True,
+                resolved_session_ids=["sess_user_a", "sess_user_b"],
+            )
+
+        assert result is True
+        assert (sessions_dir / "sess_user_a.jsonl").exists()
+        assert (sessions_dir / "sess_user_b.jsonl").exists()
+
     def test_no_matching_session(self, tmp_path):
         sessions_dir, index_file = _setup_sessions(tmp_path, {})
 
@@ -227,3 +327,10 @@ class TestAppendToSqlite:
             _append_to_sqlite("sess_1", {"role": "assistant", "content": "hello"})
 
         mock_db.close.assert_called_once()
+
+
+class TestMirrorStructureGuards:
+    def test_mirror_module_has_no_napcat_target_syntax_hardcoding(self):
+        src = Path("gateway/mirror.py").read_text(encoding="utf-8")
+        assert "group:" not in src
+        assert "private:" not in src

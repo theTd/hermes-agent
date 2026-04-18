@@ -123,7 +123,7 @@ def _install_fake_fal_client(captured):
     return fal_client_module
 
 
-def _install_fake_openai_module(captured, transcription_response=None):
+def _install_fake_openai_module(captured, transcription_response=None, image_response=None):
     class FakeSpeechResponse:
         def stream_to_file(self, output_path):
             captured["stream_to_file"] = output_path
@@ -143,6 +143,10 @@ def _install_fake_openai_module(captured, transcription_response=None):
                 captured["transcription_kwargs"] = kwargs
                 return transcription_response
 
+            def create_image(**kwargs):
+                captured["image_kwargs"] = kwargs
+                return image_response
+
             self.audio = types.SimpleNamespace(
                 speech=types.SimpleNamespace(
                     create=create_speech
@@ -150,6 +154,9 @@ def _install_fake_openai_module(captured, transcription_response=None):
                 transcriptions=types.SimpleNamespace(
                     create=create_transcription
                 ),
+            )
+            self.images = types.SimpleNamespace(
+                generate=create_image
             )
 
         def close(self):
@@ -211,6 +218,167 @@ def test_managed_fal_submit_reuses_cached_sync_client(monkeypatch):
 
     assert captured["sync_client_inits"] == 1
     assert captured["http_client"] is first_client
+
+
+def test_image_generate_uses_custom_openai_compatible_backend(monkeypatch, tmp_path):
+    captured = {}
+    _install_fake_tools_package()
+    _install_fake_fal_client({})
+    _install_fake_openai_module(
+        captured,
+        image_response=types.SimpleNamespace(
+            data=[types.SimpleNamespace(url="https://example.com/generated.png")]
+        ),
+    )
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "\n".join(
+            [
+                "image_generation:",
+                "  provider: custom",
+                "  model: doubao-seedream-5-0-260128",
+                "  base_url: https://ark.cn-beijing.volces.com/api/v3",
+                "  api_key: test-ark-key",
+                "  timeout: 45",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    image_generation_tool = _load_tool_module(
+        "tools.image_generation_tool",
+        "image_generation_tool.py",
+    )
+    monkeypatch.setattr(image_generation_tool.uuid, "uuid4", lambda: "image-call-123")
+    import tools.image_providers.openai_compatible as _openai_compat
+    monkeypatch.setattr(
+        _openai_compat,
+        "_cache_generated_remote_image",
+        lambda image_url, fallback_ext=".png": str(tmp_path / "cache" / "generated.png"),
+    )
+
+    result = image_generation_tool.image_generate_tool(
+        prompt="a red apple on a marble table",
+        aspect_ratio="portrait",
+        num_images=1,
+        output_format="png",
+    )
+
+    assert image_generation_tool.check_image_generation_requirements() is True
+    assert '"success": true' in result.lower()
+    assert str(tmp_path / "cache" / "generated.png") in result
+    assert "https://example.com/generated.png" in result
+    assert captured["api_key"] == "test-ark-key"
+    assert captured["base_url"] == "https://ark.cn-beijing.volces.com/api/v3"
+    assert captured["client_kwargs"]["timeout"] == 45
+    assert captured["client_kwargs"]["max_retries"] == 0
+    assert captured["image_kwargs"]["model"] == "doubao-seedream-5-0-260128"
+    assert captured["image_kwargs"]["size"] == "1792x2304"
+    assert captured["image_kwargs"]["response_format"] == "url"
+    assert captured["image_kwargs"]["output_format"] == "png"
+    assert captured["image_kwargs"]["extra_headers"] == {"x-idempotency-key": "image-call-123"}
+    assert captured["close_calls"] == 1
+
+
+def test_image_generate_converts_local_reference_image_to_data_url(monkeypatch, tmp_path):
+    captured = {}
+    _install_fake_tools_package()
+    _install_fake_fal_client({})
+    _install_fake_openai_module(
+        captured,
+        image_response=types.SimpleNamespace(
+            data=[types.SimpleNamespace(url="https://example.com/edited.png")]
+        ),
+    )
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "\n".join(
+            [
+                "image_generation:",
+                "  provider: custom",
+                "  model: doubao-seedream-5-0-260128",
+                "  base_url: https://ark.cn-beijing.volces.com/api/v3",
+                "  api_key: test-ark-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    reference_image = tmp_path / "reference.png"
+    reference_image.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+    )
+
+    image_generation_tool = _load_tool_module(
+        "tools.image_generation_tool",
+        "image_generation_tool.py",
+    )
+    import tools.image_providers.openai_compatible as _openai_compat
+    monkeypatch.setattr(
+        _openai_compat,
+        "_cache_generated_remote_image",
+        lambda image_url, fallback_ext=".png": str(tmp_path / "cache" / "edited.png"),
+    )
+
+    result = image_generation_tool.image_generate_tool(
+        prompt="turn this into an oil painting",
+        image=str(reference_image),
+    )
+
+    assert '"success": true' in result.lower()
+    assert str(tmp_path / "cache" / "edited.png") in result
+    assert captured["image_kwargs"]["extra_body"]["image"].startswith("data:image/png;base64,")
+
+
+def test_image_generate_omits_output_format_for_seedream_4_5(monkeypatch, tmp_path):
+    captured = {}
+    _install_fake_tools_package()
+    _install_fake_fal_client({})
+    _install_fake_openai_module(
+        captured,
+        image_response=types.SimpleNamespace(
+            data=[types.SimpleNamespace(url="https://example.com/generated.jpg")]
+        ),
+    )
+    monkeypatch.delenv("FAL_KEY", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "\n".join(
+            [
+                "image_generation:",
+                "  provider: custom",
+                "  model: doubao-seedream-4-5-251128",
+                "  base_url: https://ark.cn-beijing.volces.com/api/v3",
+                "  api_key: test-ark-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    image_generation_tool = _load_tool_module(
+        "tools.image_generation_tool",
+        "image_generation_tool.py",
+    )
+    import tools.image_providers.openai_compatible as _openai_compat
+    monkeypatch.setattr(
+        _openai_compat,
+        "_cache_generated_remote_image",
+        lambda image_url, fallback_ext=".png": str(tmp_path / "cache" / "generated.jpg"),
+    )
+
+    result = image_generation_tool.image_generate_tool(
+        prompt="a red apple on a marble table",
+        aspect_ratio="portrait",
+        num_images=1,
+        output_format="png",
+    )
+
+    assert '"success": true' in result.lower()
+    assert str(tmp_path / "cache" / "generated.jpg") in result
+    assert captured["image_kwargs"]["model"] == "doubao-seedream-4-5-251128"
+    assert "output_format" not in captured["image_kwargs"]
 
 
 def test_openai_tts_uses_managed_audio_gateway_when_direct_key_absent(monkeypatch, tmp_path):

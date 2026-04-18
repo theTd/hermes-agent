@@ -140,6 +140,14 @@ class TestResolveDeliveryTarget:
             "thread_id": None,
         }
 
+    def test_explicit_napcat_target_preserves_private_or_group_prefix(self):
+        job = {"deliver": "napcat:group:123456"}
+        assert _resolve_delivery_target(job) == {
+            "platform": "napcat",
+            "chat_id": "group:123456",
+            "thread_id": None,
+        }
+
     def test_human_friendly_label_resolved_via_channel_directory(self):
         """deliver: 'whatsapp:Alice (dm)' resolves to the real JID."""
         job = {"deliver": "whatsapp:Alice (dm)"}
@@ -293,6 +301,26 @@ class TestDeliverResultWrapping:
         assert "-------------" in sent_content
         assert "Here is today's summary." in sent_content
         assert "To stop or manage this job" in sent_content
+
+    def test_delivery_routes_napcat_platform(self):
+        from gateway.config import Platform
+
+        pconfig = MagicMock()
+        pconfig.enabled = True
+        mock_cfg = MagicMock()
+        mock_cfg.platforms = {Platform.NAPCAT: pconfig}
+
+        with patch("gateway.config.load_gateway_config", return_value=mock_cfg), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            job = {
+                "id": "qq-job",
+                "deliver": "napcat:group:123456",
+            }
+            _deliver_result(job, "hello")
+
+        send_mock.assert_called_once()
+        assert send_mock.call_args.args[0] == Platform.NAPCAT
+        assert send_mock.call_args.args[2] == "group:123456"
 
     def test_delivery_uses_job_id_when_no_name(self):
         """When a job has no name, the wrapper should fall back to job id."""

@@ -53,6 +53,7 @@ environments/benchmarks/evals/
 
 # Web UI build output
 hermes_cli/web_dist/
+hermes_cli/napcat_web_dist/
 
 # Release script temp files
 .release_notes.md

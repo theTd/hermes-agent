@@ -21,6 +21,13 @@ import pytest
 from gateway.config import Platform
 
 
+@pytest.fixture(autouse=True)
+def _patch_platform_lock():
+    with patch("gateway.status.acquire_scoped_lock", return_value=(True, None)), \
+         patch("gateway.status.release_scoped_lock", return_value=None):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

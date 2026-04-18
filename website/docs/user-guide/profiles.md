@@ -153,7 +153,7 @@ echo "You are a focused coding assistant." > ~/.hermes/profiles/coder/SOUL.md
 
 ## Updating
 
-`hermes update` pulls code once (shared) and syncs new bundled skills to **all** profiles automatically:
+`hermes update` syncs the standalone `napcat` branch once (shared) and syncs new bundled skills to **all** profiles automatically:
 
 ```bash
 hermes update

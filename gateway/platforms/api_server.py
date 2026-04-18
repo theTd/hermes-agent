@@ -633,19 +633,20 @@ class APIServerAdapter(BasePlatformAdapter):
 
         stream = body.get("stream", False)
 
-        # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
-        system_prompt = None
+        # Extract system prompt from the top-level field only.
+        system_prompt = str(body.get("system") or "").strip() or None
         conversation_messages: List[Dict[str, str]] = []
 
         for msg in messages:
             role = msg.get("role", "")
             content = _normalize_chat_content(msg.get("content", ""))
             if role == "system":
-                # Accumulate system messages
-                if system_prompt is None:
-                    system_prompt = content
-                else:
-                    system_prompt = system_prompt + "\n" + content
+                return web.json_response(
+                    _openai_error(
+                        "System prompts must be sent via the top-level 'system' field, not messages[].role=system"
+                    ),
+                    status=400,
+                )
             elif role in ("user", "assistant"):
                 conversation_messages.append({"role": role, "content": content})
 

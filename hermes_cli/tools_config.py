@@ -52,6 +52,7 @@ from hermes_cli.cli_output import (  # noqa: E402 — late import block
 CONFIGURABLE_TOOLSETS = [
     ("web",             "🔍 Web Search & Scraping",    "web_search, web_extract"),
     ("browser",         "🌐 Browser Automation",       "navigate, click, type, scroll"),
+    ("messaging",       "💬 Cross-Platform Messaging", "send_message"),
     ("terminal",        "💻 Terminal & Processes",      "terminal, process"),
     ("file",            "📁 File Operations",           "read, write, patch, search"),
     ("code_execution",  "⚡ Code Execution",            "execute_code"),
@@ -761,6 +762,8 @@ def _get_enabled_platforms() -> List[str]:
         enabled.append("telegram")
     if get_env_value("DISCORD_BOT_TOKEN"):
         enabled.append("discord")
+    if get_env_value("NAPCAT_WS_URL"):
+        enabled.append("napcat")
     if get_env_value("SLACK_BOT_TOKEN"):
         enabled.append("slack")
     if get_env_value("WHATSAPP_ENABLED"):

@@ -1,0 +1,67 @@
+name: Napcat Upstream Sync Check
+
+on:
+  push:
+    branches: [napcat]
+  pull_request:
+    branches: [napcat]
+
+permissions:
+  contents: read
+
+jobs:
+  upstream-replay-dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream main
+        run: git fetch origin main
+
+      - name: Upstream replay dry-run
+        run: |
+          set -e
+          python scripts/napcat_merge_upstream_until_conflict.py origin/main --dry-run
+
+  napcat-files-only-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          fetch-depth: 0
+
+      - name: Check for unexpected upstream file modifications
+        run: |
+          set -e
+          # Files that napcat should NOT modify without explicit review
+          PROTECTED_FILES=(
+            "run_agent.py"
+            "gateway/run.py"
+            "gateway/session.py"
+            "model_tools.py"
+            "cli.py"
+            "tools/registry.py"
+          )
+          BASE_REF="${{ github.event.pull_request.base.sha || 'origin/main' }}"
+          VIOLATIONS=0
+          for f in "${PROTECTED_FILES[@]}"; do
+            if git diff --name-only "$BASE_REF" HEAD | grep -qx "$f"; then
+              echo "⚠️  PROTECTED FILE MODIFIED: $f"
+              echo "   Napcat should minimize changes to upstream files."
+              echo "   Consider extracting napcat logic to a separate module."
+              VIOLATIONS=1
+            fi
+          done
+          if [ "$VIOLATIONS" -eq 1 ]; then
+            echo ""
+            echo "If the modification is necessary, update the protected-files list"
+            echo "in .github/workflows/napcat-upstream-sync.yml with justification."
+            exit 0  # Non-blocking warning for now
+          fi
+          echo "✅ No protected upstream files modified."

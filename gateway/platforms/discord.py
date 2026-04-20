@@ -155,8 +155,6 @@ class VoiceReceiver:
 
         # Pause flag: don't capture while bot is playing TTS
         self._paused = False
-
-        # Debug logging counter (instance-level to avoid cross-instance races)
         self._packet_debug_count = 0
 
     # ------------------------------------------------------------------
@@ -468,6 +466,53 @@ class VoiceReceiver:
                 os.unlink(pcm_path)
             except OSError:
                 pass
+
+
+def _discord_dm_channel_type():
+    return getattr(discord, "DMChannel", None) if discord is not None else None
+
+
+def _discord_thread_type():
+    return getattr(discord, "Thread", None) if discord is not None else None
+
+
+def _channel_matches_discord_type(channel: Any, discord_type: Any, fallback_name: str) -> bool:
+    if channel is None:
+        return False
+    try:
+        if discord_type is not None and isinstance(channel, discord_type):
+            return True
+    except TypeError:
+        pass
+
+    mro_names: set[str] = set()
+    for cls in getattr(type(channel), "__mro__", ()):
+        mro_names.add(getattr(cls, "__name__", ""))
+    spec_class = getattr(channel, "_spec_class", None)
+    for cls in getattr(spec_class, "__mro__", ()) if spec_class is not None else ():
+        mro_names.add(getattr(cls, "__name__", ""))
+    names = {
+        getattr(type(channel), "__name__", ""),
+        getattr(getattr(channel, "__class__", None), "__name__", ""),
+        getattr(getattr(channel, "_spec_class", None), "__name__", ""),
+        *mro_names,
+    }
+    lowered = {str(name or "").lower() for name in names}
+    if fallback_name in lowered:
+        return True
+    if fallback_name == "thread":
+        return hasattr(channel, "parent") or hasattr(channel, "parent_id")
+    return False
+
+
+def _is_dm_channel_like(channel: Any) -> bool:
+    return _channel_matches_discord_type(channel, _discord_dm_channel_type(), "dmchannel")
+
+
+def _is_thread_channel_like(channel: Any) -> bool:
+    return _channel_matches_discord_type(channel, _discord_thread_type(), "thread")
+
+
 
 
 class DiscordAdapter(BasePlatformAdapter):
@@ -2688,30 +2733,31 @@ class DiscordAdapter(BasePlatformAdapter):
 
     def _build_slash_event(self, interaction: discord.Interaction, text: str) -> MessageEvent:
         """Build a MessageEvent from a Discord slash command interaction."""
-        is_dm = isinstance(interaction.channel, discord.DMChannel)
-        is_thread = isinstance(interaction.channel, discord.Thread)
+        channel = getattr(interaction, "channel", None)
+        is_dm = _is_dm_channel_like(channel)
+        is_thread = _is_thread_channel_like(channel)
         thread_id = None
 
         if is_dm:
             chat_type = "dm"
         elif is_thread:
             chat_type = "thread"
-            thread_id = str(interaction.channel_id)
+            thread_id = str(getattr(channel, "id", interaction.channel_id))
         else:
             chat_type = "group"
 
         chat_name = ""
-        if not is_dm and hasattr(interaction.channel, "name"):
-            chat_name = interaction.channel.name
-            if hasattr(interaction.channel, "guild") and interaction.channel.guild:
-                chat_name = f"{interaction.channel.guild.name} / #{chat_name}"
+        if not is_dm and hasattr(channel, "name"):
+            chat_name = channel.name
+            if hasattr(channel, "guild") and channel.guild:
+                chat_name = f"{channel.guild.name} / #{chat_name}"
 
         # Get channel topic (if available).
         # For forum threads, inherit the parent forum's topic.
-        chat_topic = self._get_effective_topic(interaction.channel, is_thread=is_thread)
+        chat_topic = self._get_effective_topic(channel, is_thread=is_thread)
 
         source = self.build_source(
-            chat_id=str(interaction.channel_id),
+            chat_id=str(getattr(channel, "id", interaction.channel_id)),
             chat_name=chat_name,
             chat_type=chat_type,
             user_id=str(interaction.user.id),
@@ -2721,8 +2767,8 @@ class DiscordAdapter(BasePlatformAdapter):
         )
 
         msg_type = MessageType.COMMAND if text.startswith("/") else MessageType.TEXT
-        channel_id = str(interaction.channel_id)
-        parent_id = str(getattr(getattr(interaction, "channel", None), "parent_id", "") or "")
+        channel_id = str(getattr(channel, "id", interaction.channel_id))
+        parent_id = str(getattr(channel, "parent_id", "") or "")
         return MessageEvent(
             text=text,
             message_type=msg_type,
@@ -3351,7 +3397,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         thread_id = None
         parent_channel_id = None
-        is_thread = isinstance(message.channel, discord.Thread)
+        is_thread = _is_thread_channel_like(message.channel)
         if is_thread:
             thread_id = str(message.channel.id)
             parent_channel_id = self._get_parent_channel_id(message.channel)
@@ -3368,7 +3414,7 @@ class DiscordAdapter(BasePlatformAdapter):
             normalized_content = normalized_content.replace(f"<@{self._client.user.id}>", "").strip()
             normalized_content = normalized_content.replace(f"<@!{self._client.user.id}>", "").strip()
             message.content = normalized_content
-        if not isinstance(message.channel, discord.DMChannel):
+        if not _is_dm_channel_like(message.channel):
             channel_ids = {str(message.channel.id)}
             if parent_channel_id:
                 channel_ids.add(parent_channel_id)
@@ -3416,7 +3462,7 @@ class DiscordAdapter(BasePlatformAdapter):
         # Messages already inside threads or DMs are unaffected.
         # no_thread_channels: channels where bot responds directly without thread.
         auto_threaded_channel = None
-        if not is_thread and not isinstance(message.channel, discord.DMChannel):
+        if not is_thread and not _is_dm_channel_like(message.channel):
             no_thread_channels_raw = os.getenv("DISCORD_NO_THREAD_CHANNELS", "")
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
             skip_thread = bool(channel_ids & no_thread_channels) or is_free_channel
@@ -3458,7 +3504,7 @@ class DiscordAdapter(BasePlatformAdapter):
         effective_channel = auto_threaded_channel or message.channel
 
         # Determine chat type
-        if isinstance(message.channel, discord.DMChannel):
+        if _is_dm_channel_like(message.channel):
             chat_type = "dm"
             chat_name = message.author.name
         elif is_thread:

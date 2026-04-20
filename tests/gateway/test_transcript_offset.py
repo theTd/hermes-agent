@@ -265,3 +265,24 @@ class TestTranscriptHistoryOffset:
         assert len(fixed_new) == 2
         assert fixed_new[0]["content"] == "Now search for dogs"
         assert fixed_new[1]["content"] == "Dog results here."
+
+    def test_mirror_assistant_messages_keep_plain_content(self):
+        """Mirrored assistant messages should read like normal assistant history.
+
+        Regression: gateway/run.py used to wrap mirrored content as
+        ``[Delivered from ...] ...``, which made cross-session injections feel
+        unnatural and caused the model to talk about delivery mechanics instead
+        of treating the message as something it had simply said.
+        """
+        history = [
+            {"role": "assistant", "content": "Cross-session test", "mirror": True,
+             "mirror_source": "napcat", "timestamp": "t1"},
+            {"role": "user", "content": "What did you just say", "timestamp": "t2"},
+        ]
+
+        agent_history = _filter_history(history)
+
+        assert agent_history == [
+            {"role": "assistant", "content": "Cross-session test"},
+            {"role": "user", "content": "What did you just say"},
+        ]

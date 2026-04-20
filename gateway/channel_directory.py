@@ -37,6 +37,10 @@ def _session_entry_id(origin: Dict[str, Any]) -> Optional[str]:
     chat_id = origin.get("chat_id")
     if not chat_id:
         return None
+    if origin.get("platform") == "napcat":
+        chat_type = (origin.get("chat_type") or "dm").lower()
+        prefix = "group" if chat_type == "group" else "private"
+        return f"{prefix}:{chat_id}"
     thread_id = origin.get("thread_id")
     if thread_id:
         return f"{chat_id}:{thread_id}"
@@ -77,8 +81,9 @@ async def build_channel_directory(adapters: Dict[Any, Any]) -> Dict[str, Any]:
             logger.warning("Channel directory: failed to build %s: %s", platform.value, e)
 
     # Platforms that don't support direct channel enumeration get session-based
-    # discovery automatically.  Skip infrastructure entries that aren't messaging
-    # platforms — everything else falls through to _build_from_sessions().
+    # discovery automatically, including "email" and other session-only
+    # transports. Skip infrastructure entries that aren't messaging platforms;
+    # everything else falls through to _build_from_sessions().
     _SKIP_SESSION_DISCOVERY = frozenset({"local", "api_server", "webhook"})
     for plat in Platform:
         plat_name = plat.value

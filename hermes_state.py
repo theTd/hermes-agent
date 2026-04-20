@@ -21,6 +21,7 @@ import re
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -1362,6 +1363,16 @@ class SessionDB:
 
         self._execute_write(_do)
 
+    @staticmethod
+    def _format_timestamp(ts: Any) -> Optional[str]:
+        """Convert a stored timestamp (float epoch) to ISO format string."""
+        if ts is None:
+            return None
+        try:
+            return datetime.fromtimestamp(float(ts)).isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages for a session, ordered by timestamp."""
         with self._lock:
@@ -1381,6 +1392,9 @@ class SessionDB:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
                     msg["tool_calls"] = []
+            _ts = self._format_timestamp(msg.pop("timestamp", None))
+            if _ts:
+                msg["timestamp"] = _ts
             result.append(msg)
         return result
 
@@ -1465,7 +1479,7 @@ class SessionDB:
             rows = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items "
+                "codex_reasoning_items, codex_message_items, timestamp "
                 f"FROM messages WHERE session_id IN ({placeholders}) ORDER BY timestamp, id",
                 tuple(session_ids),
             ).fetchall()
@@ -1516,6 +1530,9 @@ class SessionDB:
                         msg["codex_message_items"] = None
             if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
                 continue
+            _ts = self._format_timestamp(row["timestamp"])
+            if _ts:
+                msg["timestamp"] = _ts
             messages.append(msg)
         return messages
 

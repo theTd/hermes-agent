@@ -1416,6 +1416,14 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool
     if not pconfig or pconfig.auth_type != AUTH_TYPE_API_KEY:
         return changed, active_sources
 
+    if provider == "anthropic":
+        try:
+            from hermes_cli.auth import is_provider_explicitly_configured
+            if not is_provider_explicitly_configured("anthropic"):
+                return changed, active_sources
+        except ImportError:
+            pass
+
     env_url = ""
     if pconfig.base_url_env_var:
         env_url = (get_env_value(pconfig.base_url_env_var) or "").strip().rstrip("/")

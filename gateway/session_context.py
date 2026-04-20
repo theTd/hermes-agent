@@ -48,13 +48,14 @@ _UNSET: Any = object()
 # Per-task session variables
 # ---------------------------------------------------------------------------
 
-_SESSION_PLATFORM: ContextVar = ContextVar("HERMES_SESSION_PLATFORM", default=_UNSET)
-_SESSION_CHAT_ID: ContextVar = ContextVar("HERMES_SESSION_CHAT_ID", default=_UNSET)
-_SESSION_CHAT_NAME: ContextVar = ContextVar("HERMES_SESSION_CHAT_NAME", default=_UNSET)
-_SESSION_THREAD_ID: ContextVar = ContextVar("HERMES_SESSION_THREAD_ID", default=_UNSET)
-_SESSION_USER_ID: ContextVar = ContextVar("HERMES_SESSION_USER_ID", default=_UNSET)
-_SESSION_USER_NAME: ContextVar = ContextVar("HERMES_SESSION_USER_NAME", default=_UNSET)
-_SESSION_KEY: ContextVar = ContextVar("HERMES_SESSION_KEY", default=_UNSET)
+_SESSION_PLATFORM: ContextVar[Any] = ContextVar("HERMES_SESSION_PLATFORM", default=_UNSET)
+_SESSION_CHAT_ID: ContextVar[Any] = ContextVar("HERMES_SESSION_CHAT_ID", default=_UNSET)
+_SESSION_CHAT_NAME: ContextVar[Any] = ContextVar("HERMES_SESSION_CHAT_NAME", default=_UNSET)
+_SESSION_CHAT_TYPE: ContextVar[Any] = ContextVar("HERMES_SESSION_CHAT_TYPE", default=_UNSET)
+_SESSION_THREAD_ID: ContextVar[Any] = ContextVar("HERMES_SESSION_THREAD_ID", default=_UNSET)
+_SESSION_USER_ID: ContextVar[Any] = ContextVar("HERMES_SESSION_USER_ID", default=_UNSET)
+_SESSION_USER_NAME: ContextVar[Any] = ContextVar("HERMES_SESSION_USER_NAME", default=_UNSET)
+_SESSION_KEY: ContextVar[Any] = ContextVar("HERMES_SESSION_KEY", default=_UNSET)
 
 # Cron auto-delivery vars — set per-job in run_job() so concurrent jobs
 # don't clobber each other's delivery targets.
@@ -66,6 +67,7 @@ _VAR_MAP = {
     "HERMES_SESSION_PLATFORM": _SESSION_PLATFORM,
     "HERMES_SESSION_CHAT_ID": _SESSION_CHAT_ID,
     "HERMES_SESSION_CHAT_NAME": _SESSION_CHAT_NAME,
+    "HERMES_SESSION_CHAT_TYPE": _SESSION_CHAT_TYPE,
     "HERMES_SESSION_THREAD_ID": _SESSION_THREAD_ID,
     "HERMES_SESSION_USER_ID": _SESSION_USER_ID,
     "HERMES_SESSION_USER_NAME": _SESSION_USER_NAME,
@@ -80,6 +82,7 @@ def set_session_vars(
     platform: str = "",
     chat_id: str = "",
     chat_name: str = "",
+    chat_type: str = "",
     thread_id: str = "",
     user_id: str = "",
     user_name: str = "",
@@ -97,6 +100,7 @@ def set_session_vars(
         _SESSION_PLATFORM.set(platform),
         _SESSION_CHAT_ID.set(chat_id),
         _SESSION_CHAT_NAME.set(chat_name),
+        _SESSION_CHAT_TYPE.set(chat_type),
         _SESSION_THREAD_ID.set(thread_id),
         _SESSION_USER_ID.set(user_id),
         _SESSION_USER_NAME.set(user_name),
@@ -120,6 +124,7 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_PLATFORM,
         _SESSION_CHAT_ID,
         _SESSION_CHAT_NAME,
+        _SESSION_CHAT_TYPE,
         _SESSION_THREAD_ID,
         _SESSION_USER_ID,
         _SESSION_USER_NAME,

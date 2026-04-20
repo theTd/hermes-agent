@@ -81,6 +81,7 @@ class Platform(Enum):
     LOCAL = "local"
     TELEGRAM = "telegram"
     DISCORD = "discord"
+    NAPCAT = "napcat"
     WHATSAPP = "whatsapp"
     SLACK = "slack"
     SIGNAL = "signal"
@@ -371,6 +372,154 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
 
 
 @dataclass
+class GatewayOrchestratorConfig:
+    """Session-level gateway orchestrator settings."""
+
+    enabled_platforms: List[str] = field(default_factory=list)
+    child_max_concurrency: int = 1
+    child_default_toolsets: List[str] = field(default_factory=list)
+    child_direct_reply_enabled: bool = True
+    child_progress_reply_enabled: bool = True
+    orchestrator_model: str = ""
+    orchestrator_provider: str = ""
+    orchestrator_base_url: str = ""
+    orchestrator_api_key: str = ""
+    orchestrator_reasoning_effort: str = ""
+    orchestrator_context_length: int = 0
+    routing_history_max_entries: int = 0
+    routing_stable_prefix_messages: int = 8
+    child_model_policy: str = "promotion"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled_platforms": list(self.enabled_platforms),
+            "child_max_concurrency": self.child_max_concurrency,
+            "child_default_toolsets": list(self.child_default_toolsets),
+            "child_direct_reply_enabled": self.child_direct_reply_enabled,
+            "child_progress_reply_enabled": self.child_progress_reply_enabled,
+            "orchestrator_model": self.orchestrator_model,
+            "orchestrator_provider": self.orchestrator_provider,
+            "orchestrator_base_url": self.orchestrator_base_url,
+            "orchestrator_api_key": self.orchestrator_api_key,
+            "orchestrator_reasoning_effort": self.orchestrator_reasoning_effort,
+            "orchestrator_context_length": self.orchestrator_context_length,
+            "routing_history_max_entries": self.routing_history_max_entries,
+            "routing_stable_prefix_messages": self.routing_stable_prefix_messages,
+            "child_model_policy": self.child_model_policy,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "GatewayOrchestratorConfig":
+        if not isinstance(data, dict):
+            return cls()
+        defaults = cls()
+        enabled_platforms = data.get("enabled_platforms")
+        enabled_platforms_missing = "enabled_platforms" not in data
+        if isinstance(enabled_platforms, str):
+            enabled_platforms = [part.strip() for part in enabled_platforms.split(",") if part.strip()]
+        elif enabled_platforms is None and enabled_platforms_missing:
+            enabled_platforms = list(defaults.enabled_platforms)
+        elif not isinstance(enabled_platforms, list):
+            enabled_platforms = list(defaults.enabled_platforms)
+        child_default_toolsets = data.get("child_default_toolsets")
+        if isinstance(child_default_toolsets, str):
+            child_default_toolsets = [part.strip() for part in child_default_toolsets.split(",") if part.strip()]
+        if not isinstance(child_default_toolsets, list):
+            child_default_toolsets = []
+        try:
+            child_max_concurrency = int(data.get("child_max_concurrency", 1))
+        except (TypeError, ValueError):
+            child_max_concurrency = 1
+        try:
+            orchestrator_context_length = int(data.get("orchestrator_context_length", 0) or 0)
+        except (TypeError, ValueError):
+            orchestrator_context_length = 0
+        try:
+            routing_history_max_entries = int(data.get("routing_history_max_entries", 0) or 0)
+        except (TypeError, ValueError):
+            routing_history_max_entries = 0
+        try:
+            routing_stable_prefix_messages = int(
+                data.get(
+                    "routing_stable_prefix_messages",
+                    defaults.routing_stable_prefix_messages,
+                )
+                or defaults.routing_stable_prefix_messages
+            )
+        except (TypeError, ValueError):
+            routing_stable_prefix_messages = defaults.routing_stable_prefix_messages
+        return cls(
+            enabled_platforms=[str(item).strip().lower() for item in enabled_platforms if str(item).strip()],
+            child_max_concurrency=max(1, child_max_concurrency),
+            child_default_toolsets=[str(item).strip() for item in child_default_toolsets if str(item).strip()],
+            child_direct_reply_enabled=_coerce_bool(data.get("child_direct_reply_enabled"), True),
+            child_progress_reply_enabled=_coerce_bool(data.get("child_progress_reply_enabled"), True),
+            orchestrator_model=(
+                str(data.get("orchestrator_model") or "").strip() or defaults.orchestrator_model
+            ),
+            orchestrator_provider=(
+                str(data.get("orchestrator_provider") or "").strip() or defaults.orchestrator_provider
+            ),
+            orchestrator_base_url=(
+                str(data.get("orchestrator_base_url") or "").strip() or defaults.orchestrator_base_url
+            ),
+            orchestrator_api_key=str(data.get("orchestrator_api_key") or "").strip(),
+            orchestrator_reasoning_effort=(
+                str(data.get("orchestrator_reasoning_effort") or "").strip()
+                or defaults.orchestrator_reasoning_effort
+            ),
+            orchestrator_context_length=max(0, orchestrator_context_length),
+            routing_history_max_entries=max(0, routing_history_max_entries),
+            routing_stable_prefix_messages=max(0, routing_stable_prefix_messages),
+            child_model_policy=str(data.get("child_model_policy") or "promotion").strip() or "promotion",
+        )
+
+    def is_enabled_for_platform(self, platform: Optional[Platform]) -> bool:
+        platform_name = getattr(platform, "value", str(platform or "")).strip().lower()
+        return bool(platform_name and platform_name in set(self.enabled_platforms or []))
+
+
+def get_gateway_orchestrator_config(
+    config: Optional["GatewayConfig"],
+    *,
+    platform: Optional[Platform] = None,
+) -> GatewayOrchestratorConfig:
+    """Return the effective gateway orchestrator config for the requested platform."""
+    if config is None:
+        return GatewayOrchestratorConfig()
+
+    defaults = GatewayOrchestratorConfig()
+    raw_fallback = getattr(config, "gateway_orchestrator", None)
+    fallback_data: Dict[str, Any] = {}
+    if isinstance(raw_fallback, GatewayOrchestratorConfig):
+        fallback_data = raw_fallback.to_dict()
+    elif isinstance(raw_fallback, dict):
+        fallback_data = dict(raw_fallback)
+
+    extra_data: Dict[str, Any] = {}
+    platform_cfg = getattr(config, "platforms", {}).get(platform) if platform else None
+    extra = getattr(platform_cfg, "extra", None)
+    if isinstance(extra, dict):
+        raw = extra.get("orchestrator")
+        if isinstance(raw, GatewayOrchestratorConfig):
+            extra_data = raw.to_dict()
+        elif isinstance(raw, dict):
+            extra_data = dict(raw)
+
+    canonical = GatewayOrchestratorConfig.from_dict(
+        {
+            **defaults.to_dict(),
+            **fallback_data,
+            **extra_data,
+        }
+    )
+
+    if isinstance(extra, dict):
+        extra["orchestrator"] = canonical.to_dict()
+    return canonical
+
+
+@dataclass
 class GatewayConfig:
     """
     Main gateway configuration.
@@ -417,14 +566,34 @@ class GatewayConfig:
     # fresh session exactly as if the reset policy had fired.  0 = disabled.
     session_store_max_age_days: int = 90
 
+    # Session-level orchestrator
+    gateway_orchestrator: GatewayOrchestratorConfig = field(default_factory=GatewayOrchestratorConfig)
+
+    # NapCat in-process observability sidecar. Loaded from the
+    # ``napcat_observability`` block in config.yaml. Kept as a free-form
+    # mapping so adding new keys does not require touching this dataclass.
+    napcat_observability: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        _apply_platform_defaults(self)
+        self.gateway_orchestrator = get_gateway_orchestrator_config(self)
+
     def get_connected_platforms(self) -> List[Platform]:
         """Return list of platforms that are enabled and configured."""
+        from gateway.config_extension import build_gateway_config_extension
+
+        config_extension = build_gateway_config_extension()
         connected = []
         for platform, config in self.platforms.items():
             if not config.enabled:
                 continue
             if self._is_platform_connected(platform, config):
                 connected.append(platform)
+                continue
+            custom_connected = config_extension.platform_connection_ready(platform, config)
+            if custom_connected:
+                connected.append(platform)
+
         return connected
 
     def _is_platform_connected(self, platform: Platform, config: PlatformConfig) -> bool:
@@ -489,6 +658,7 @@ class GatewayConfig:
         return self.default_reset_policy
     
     def to_dict(self) -> Dict[str, Any]:
+        orchestrator_cfg = get_gateway_orchestrator_config(self)
         return {
             "platforms": {
                 p.value: c.to_dict() for p, c in self.platforms.items()
@@ -510,6 +680,8 @@ class GatewayConfig:
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
             "session_store_max_age_days": self.session_store_max_age_days,
+            "gateway_orchestrator": orchestrator_cfg.to_dict(),
+            "napcat_observability": dict(self.napcat_observability),
         }
     
     @classmethod
@@ -564,6 +736,10 @@ class GatewayConfig:
         except (TypeError, ValueError):
             session_store_max_age_days = 90
 
+        napcat_observability = data.get("napcat_observability", {})
+        if not isinstance(napcat_observability, dict):
+            napcat_observability = {}
+
         return cls(
             platforms=platforms,
             default_reset_policy=default_policy,
@@ -579,6 +755,8 @@ class GatewayConfig:
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
+            gateway_orchestrator=GatewayOrchestratorConfig.from_dict(data.get("gateway_orchestrator", {})),
+            napcat_observability=dict(napcat_observability),
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -623,10 +801,14 @@ def load_gateway_config() -> GatewayConfig:
     # Primary source: config.yaml
     try:
         import yaml
+        from gateway.config_extension import build_gateway_config_extension
+        from hermes_cli.config import _expand_env_vars
         config_yaml_path = _home / "config.yaml"
         if config_yaml_path.exists():
             with open(config_yaml_path, encoding="utf-8") as f:
                 yaml_cfg = yaml.safe_load(f) or {}
+            yaml_cfg = _expand_env_vars(yaml_cfg)
+            config_extension = build_gateway_config_extension()
 
             # Map config.yaml keys → GatewayConfig.from_dict() schema.
             # Each key overwrites whatever gateway.json may have set.
@@ -645,6 +827,10 @@ def load_gateway_config() -> GatewayConfig:
                         type(qc).__name__,
                     )
 
+            gateway_orchestrator_cfg = yaml_cfg.get("gateway_orchestrator")
+            if isinstance(gateway_orchestrator_cfg, dict):
+                gw_data["gateway_orchestrator"] = gateway_orchestrator_cfg
+
             stt_cfg = yaml_cfg.get("stt")
             if isinstance(stt_cfg, dict):
                 gw_data["stt"] = stt_cfg
@@ -658,6 +844,10 @@ def load_gateway_config() -> GatewayConfig:
             streaming_cfg = yaml_cfg.get("streaming")
             if isinstance(streaming_cfg, dict):
                 gw_data["streaming"] = streaming_cfg
+
+            napcat_obs_cfg = yaml_cfg.get("napcat_observability")
+            if isinstance(napcat_obs_cfg, dict):
+                gw_data["napcat_observability"] = napcat_obs_cfg
 
             if "reset_triggers" in yaml_cfg:
                 gw_data["reset_triggers"] = yaml_cfg["reset_triggers"]
@@ -733,6 +923,7 @@ def load_gateway_config() -> GatewayConfig:
                         bridged["channel_prompts"] = {str(k): v for k, v in channel_prompts.items()}
                     else:
                         bridged["channel_prompts"] = channel_prompts
+                config_extension.bridge_platform_config(plat, platform_cfg, bridged)
                 enabled_was_explicit = "enabled" in platform_cfg
                 if not bridged and not enabled_was_explicit:
                     continue
@@ -935,9 +1126,11 @@ def load_gateway_config() -> GatewayConfig:
         )
 
     config = GatewayConfig.from_dict(gw_data)
+    _apply_platform_defaults(config)
 
     # Override with environment variables
     _apply_env_overrides(config)
+    _apply_platform_defaults(config)
     
     # --- Validate loaded values ---
     _validate_gateway_config(config)
@@ -1014,6 +1207,13 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
                 pconfig.enabled = False
 
 
+def _apply_platform_defaults(config: GatewayConfig) -> None:
+    """Apply platform-specific config defaults after merging config sources."""
+    from gateway.config_extension import build_gateway_config_extension
+
+    build_gateway_config_extension().apply_platform_defaults(config)
+
+
 def _apply_env_overrides(config: GatewayConfig) -> None:
     """Apply environment variable overrides to config."""
     
@@ -1063,7 +1263,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             chat_id=discord_home,
             name=os.getenv("DISCORD_HOME_CHANNEL_NAME", "Home"),
         )
-    
+
     # Reply threading mode for Discord (off/first/all)
     discord_reply_mode = os.getenv("DISCORD_REPLY_TO_MODE", "").lower()
     if discord_reply_mode in ("off", "first", "all"):
@@ -1537,3 +1737,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             config.platforms[platform].enabled = True
     except Exception as e:
         logger.debug("Plugin platform enable pass failed: %s", e)
+
+    from gateway.config_extension import build_gateway_config_extension
+
+    build_gateway_config_extension().apply_env_overrides(config)

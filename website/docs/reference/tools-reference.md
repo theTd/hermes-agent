@@ -115,6 +115,13 @@ Scoped to the Feishu document-comment handler. Drives comment read/write operati
 |------|-------------|----------------------|
 | `memory` | Save important information to persistent memory that survives across sessions. Your memory appears in your system prompt at session start -- it's how you remember things about the user and your environment between conversations. WHEN TO SA… | — |
 
+## `napcat` toolset
+
+| Tool | Description | Requires environment |
+|------|-------------|----------------------|
+| `napcat_manage_settings` | Inspect and update Hermes NapCat / QQ admin settings for the current session. Use this inside a NapCat session for tasks like adding or removing super admins, changing the current group's personality, toggling group trigger rules, editing current-group allow/deny lists, or setting the current group's model override. This tool writes structured config changes and reports that a gateway restart is required for full effect. Do not use it for API keys, tokens, ws_url, or arbitrary config editing. | — |
+| `napcat_read_history` | Read QQ/NapCat message history for the current NapCat session. Automatically binds to the current group or current private chat and pages through NapCat's history APIs using `count`, `message_seq`, and `reverse_order`. Only available inside an active NapCat gateway session. | — |
+
 ## `messaging` toolset
 
 | Tool | Description | Requires environment |
@@ -229,5 +236,4 @@ Registered only on the `hermes-yuanbao` platform toolset. Yuanbao is Tencent's c
 | `yb_send_dm` | Send a private/direct message to a user in a group, with optional media files. | Yuanbao credentials |
 | `yb_search_sticker` | Search the built-in Yuanbao sticker (TIM face) catalogue by keyword. | Yuanbao credentials |
 | `yb_send_sticker` | Send a built-in sticker to the current Yuanbao chat. | Yuanbao credentials |
-
 

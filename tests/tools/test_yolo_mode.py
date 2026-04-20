@@ -14,6 +14,7 @@ from tools.approval import (
     enable_session_yolo,
     is_session_yolo_enabled,
     reset_current_session_key,
+    set_session_auto_yolo_default,
     set_current_session_key,
 )
 
@@ -25,12 +26,14 @@ def _clear_approval_state():
     approval_module.clear_session("test-session")
     approval_module.clear_session("session-a")
     approval_module.clear_session("session-b")
+    approval_module.clear_session("session-auto")
     yield
     approval_module._permanent_approved.clear()
     approval_module.clear_session("default")
     approval_module.clear_session("test-session")
     approval_module.clear_session("session-a")
     approval_module.clear_session("session-b")
+    approval_module.clear_session("session-auto")
 
 
 class TestYoloMode:
@@ -216,3 +219,26 @@ class TestYoloMode:
         approval_module.clear_session("session-a")
 
         assert is_session_yolo_enabled("session-a") is False
+
+    def test_auto_yolo_default_can_be_temporarily_disabled_per_session(self):
+        """Configured auto-YOLO should default on, but /yolo can still turn it off."""
+        set_session_auto_yolo_default("session-auto", True)
+        assert is_session_yolo_enabled("session-auto") is True
+
+        disable_session_yolo("session-auto")
+        assert is_session_yolo_enabled("session-auto") is False
+
+        enable_session_yolo("session-auto")
+        assert is_session_yolo_enabled("session-auto") is True
+
+    def test_clearing_session_restores_auto_yolo_default_when_reapplied(self):
+        """Resetting a session should drop overrides so the configured default can apply again."""
+        set_session_auto_yolo_default("session-auto", True)
+        disable_session_yolo("session-auto")
+        assert is_session_yolo_enabled("session-auto") is False
+
+        approval_module.clear_session("session-auto")
+        assert is_session_yolo_enabled("session-auto") is False
+
+        set_session_auto_yolo_default("session-auto", True)
+        assert is_session_yolo_enabled("session-auto") is True

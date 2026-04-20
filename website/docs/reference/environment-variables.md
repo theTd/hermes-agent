@@ -251,6 +251,11 @@ For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETI
 | `DISCORD_ALLOW_MENTION_ROLES` | Allow the bot to ping `@role` mentions (default: `false`). |
 | `DISCORD_ALLOW_MENTION_USERS` | Allow the bot to ping individual `@user` mentions (default: `true`). |
 | `DISCORD_ALLOW_MENTION_REPLIED_USER` | Ping the author when replying to their message (default: `true`). |
+| `NAPCAT_WS_URL` | NapCat OneBot 11 forward WebSocket URL (for example `ws://127.0.0.1:3001/`) |
+| `NAPCAT_TOKEN` | Optional OneBot token for NapCat |
+| `NAPCAT_ALLOWED_USERS` | Comma-separated QQ user IDs allowed to use Hermes through NapCat |
+| `NAPCAT_ALLOW_ALL_USERS` | Allow all NapCat / QQ users without an allowlist (`true`/`false`) |
+| `NAPCAT_HOME_CHANNEL` | Default NapCat target for cron delivery and proactive messages. Must use `group:<id>` or `private:<id>` format |
 | `SLACK_BOT_TOKEN` | Slack bot token (`xoxb-...`) |
 | `SLACK_APP_TOKEN` | Slack app-level token (`xapp-...`, required for Socket Mode) |
 | `SLACK_ALLOWED_USERS` | Comma-separated Slack user IDs |

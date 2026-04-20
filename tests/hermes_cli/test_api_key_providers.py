@@ -22,6 +22,14 @@ from hermes_cli.auth import (
 from hermes_cli.copilot_auth import _try_gh_cli_token
 
 
+def _disable_zai_endpoint_cache(monkeypatch):
+    monkeypatch.delenv("GLM_BASE_URL", raising=False)
+    monkeypatch.setattr(
+        "hermes_cli.auth._load_auth_store",
+        lambda *args, **kwargs: {"version": 1, "providers": {}},
+    )
+
+
 # =============================================================================
 # Provider Registry tests
 # =============================================================================
@@ -405,6 +413,7 @@ class TestApiKeyProviderStatus:
 class TestResolveApiKeyProviderCredentials:
 
     def test_resolve_zai_with_key(self, monkeypatch):
+        _disable_zai_endpoint_cache(monkeypatch)
         monkeypatch.setenv("GLM_API_KEY", "glm-secret-key")
         monkeypatch.setattr("hermes_cli.auth.detect_zai_endpoint", lambda *a, **kw: None)
         creds = resolve_api_key_provider_credentials("zai")
@@ -973,6 +982,7 @@ class TestKimiCodeCredentialAutoDetect:
 
     def test_non_kimi_providers_unaffected(self, monkeypatch):
         """Ensure the auto-detect logic doesn't leak to other providers."""
+        _disable_zai_endpoint_cache(monkeypatch)
         monkeypatch.setenv("GLM_API_KEY", "sk-kim...isnt")
         monkeypatch.setattr("hermes_cli.auth.detect_zai_endpoint", lambda *a, **kw: None)
         creds = resolve_api_key_provider_credentials("zai")
@@ -997,6 +1007,7 @@ class TestZaiEndpointAutoDetect:
         assert creds["base_url"] == "https://api.z.ai/api/coding/paas/v4"
 
     def test_probe_failure_falls_back_to_default(self, monkeypatch):
+        _disable_zai_endpoint_cache(monkeypatch)
         monkeypatch.setenv("GLM_API_KEY", "glm-key")
         monkeypatch.setattr("hermes_cli.auth.detect_zai_endpoint", lambda *a, **kw: None)
         creds = resolve_api_key_provider_credentials("zai")

@@ -14,7 +14,7 @@ Update to the latest version with a single command:
 hermes update
 ```
 
-This pulls the latest code, updates dependencies, and prompts you to configure any new options that were added since your last update.
+This syncs the latest code from the standalone `napcat` branch, updates dependencies, and prompts you to configure any new options that were added since your last update.
 
 :::tip
 `hermes update` automatically detects new configuration options and prompts you to add them. If you skipped that prompt, you can manually run `hermes config check` to see missing options, then `hermes config migrate` to interactively add them.
@@ -25,14 +25,14 @@ This pulls the latest code, updates dependencies, and prompts you to configure a
 When you run `hermes update`, the following steps occur:
 
 1. **Pairing-data snapshot** — a lightweight pre-update state snapshot is saved (covers `~/.hermes/pairing/`, Feishu comment rules, and other state files that get modified at runtime). Rollbackable via `hermes backup restore --state pre-update`.
-2. **Git pull** — pulls the latest code from the `main` branch and updates submodules
+2. **Git sync** — fetches the standalone `napcat` branch and aligns the local checkout to it
 3. **Dependency install** — runs `uv pip install -e ".[all]"` to pick up new or changed dependencies
 4. **Config migration** — detects new config options added since your version and prompts you to set them
 5. **Gateway auto-restart** — running gateways are refreshed after the update completes so the new code takes effect immediately. Service-managed gateways (systemd on Linux, launchd on macOS) are restarted through the service manager. Manual gateways are relaunched automatically when Hermes can map the running PID back to a profile.
 
 ### Preview-only: `hermes update --check`
 
-Want to know if you're behind `origin/main` before actually pulling? Run `hermes update --check` — it fetches, prints your local commit and the latest remote commit side-by-side, and exits `0` if in sync or `1` if behind. No files are modified, no gateway is restarted. Useful in scripts and cron jobs that gate on "is there an update".
+Want to know if you're behind the standalone `napcat` branch before actually pulling? Run `hermes update --check` — it fetches, prints your local commit and the latest remote commit side-by-side, and exits `0` if in sync or `1` if behind. No files are modified, no gateway is restarted. Useful in scripts and cron jobs that gate on "is there an update".
 
 ### Full pre-update backup: `--backup`
 
@@ -57,7 +57,7 @@ Expected output looks like:
 ```
 $ hermes update
 Updating Hermes Agent...
-📥 Pulling latest code...
+📥 Syncing latest code from theTd/hermes-agent:napcat...
 Already up to date.  (or: Updating abc1234..def5678)
 📦 Updating dependencies...
 ✅ Dependencies updated
@@ -103,7 +103,7 @@ You no longer need to wrap `hermes update` in `screen` or `tmux` to survive a te
 hermes version
 ```
 
-Compare against the latest release at the [GitHub releases page](https://github.com/NousResearch/hermes-agent/releases).
+Compare against the latest code on [theTd/hermes-agent](https://github.com/theTd/hermes-agent).
 
 ### Updating from Messaging Platforms
 
@@ -123,8 +123,10 @@ If you installed manually (not via the quick installer):
 cd /path/to/hermes-agent
 export VIRTUAL_ENV="$(pwd)/venv"
 
-# Pull latest code and submodules
-git pull origin main
+# Sync latest code and submodules
+git fetch origin
+git checkout napcat
+git reset --hard origin/napcat
 git submodule update --init --recursive
 
 # Reinstall (picks up new dependencies)

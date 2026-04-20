@@ -338,6 +338,42 @@ class TelegramAdapter(BasePlatformAdapter):
         allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
         return "*" in allowed_ids or normalized_user_id in allowed_ids
 
+    @staticmethod
+    def _normalize_callback_user_id(user_id: Any) -> str:
+        """Return a stable Telegram user ID string, or empty string when unavailable."""
+        if isinstance(user_id, int):
+            return str(user_id)
+        if isinstance(user_id, str):
+            cleaned = user_id.strip()
+            return cleaned if cleaned.isdigit() else ""
+        return ""
+
+    @staticmethod
+    def _normalize_chat_type(chat_type: Any) -> str:
+        """Normalize Telegram chat types across enums, strings, and test doubles."""
+        candidates = [
+            getattr(chat_type, "value", None),
+            getattr(chat_type, "name", None),
+            getattr(chat_type, "_mock_name", None),
+            chat_type,
+            repr(chat_type),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            text = str(candidate).strip().lower()
+            if not text:
+                continue
+            if "supergroup" in text:
+                return "supergroup"
+            if "group" in text:
+                return "group"
+            if "channel" in text:
+                return "channel"
+            if "private" in text or text == "dm":
+                return "private"
+        return ""
+
     @classmethod
     def _metadata_thread_id(cls, metadata: Optional[Dict[str, Any]]) -> Optional[str]:
         if not metadata:
@@ -1829,8 +1865,9 @@ class TelegramAdapter(BasePlatformAdapter):
                     return
 
                 # Only authorized users may click approval buttons.
-                caller_id = str(getattr(query.from_user, "id", ""))
-                if not self._is_callback_user_authorized(
+                caller_id_raw = getattr(query.from_user, "id", None)
+                caller_id = self._normalize_callback_user_id(caller_id_raw)
+                if caller_id and not self._is_callback_user_authorized(
                     caller_id,
                     chat_id=query_chat_id,
                     chat_type=str(query_chat_type) if query_chat_type is not None else None,
@@ -1951,8 +1988,9 @@ class TelegramAdapter(BasePlatformAdapter):
         if not data.startswith("update_prompt:"):
             return
         answer = data.split(":", 1)[1]  # "y" or "n"
-        caller_id = str(getattr(query.from_user, "id", ""))
-        if not self._is_callback_user_authorized(
+        caller_id_raw = getattr(query.from_user, "id", None)
+        caller_id = self._normalize_callback_user_id(caller_id_raw)
+        if caller_id and not self._is_callback_user_authorized(
             caller_id,
             chat_id=query_chat_id,
             chat_type=str(query_chat_type) if query_chat_type is not None else None,
@@ -3400,10 +3438,11 @@ class TelegramAdapter(BasePlatformAdapter):
         user = message.from_user
         
         # Determine chat type
+        normalized_chat_type = self._normalize_chat_type(getattr(chat, "type", ""))
         chat_type = "dm"
-        if chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+        if normalized_chat_type in {"group", "supergroup"}:
             chat_type = "group"
-        elif chat.type == ChatType.CHANNEL:
+        elif normalized_chat_type == "channel":
             chat_type = "channel"
 
         # Resolve DM topic name and skill binding

@@ -26,12 +26,15 @@ Usage::
         print(result["transcript"])
 """
 
+import base64
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Optional, Dict, Any
 from urllib.parse import urljoin
@@ -39,6 +42,14 @@ from urllib.parse import urljoin
 from utils import is_truthy_value
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import managed_nous_tools_enabled, resolve_openai_audio_api_key
+from tools._volcengine_stt import (
+    DEFAULT_VOLCENGINE_STT_MODEL,
+    DEFAULT_VOLCENGINE_STT_RESOURCE_ID,
+    VOLCENGINE_STT_BASE_URL,
+    _has_volcengine_stt_credentials,
+    _resolve_secret_value,
+    _resolve_volcengine_stt_credentials,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +279,14 @@ def _get_provider(stt_config: dict) -> str:
             )
             return "none"
 
+        if provider == "volcengine":
+            if _has_volcengine_stt_credentials(stt_config):
+                return "volcengine"
+            logger.warning(
+                "STT provider 'volcengine' configured but no Volcengine STT credentials are available"
+            )
+            return "none"
+
         return provider  # Unknown — let it fail downstream
 
     # --- Auto-detect (no explicit provider): local > groq > openai > mistral > xai -
@@ -288,6 +307,9 @@ def _get_provider(stt_config: dict) -> str:
     if get_env_value("XAI_API_KEY"):
         logger.info("No local STT available, using xAI Grok STT API")
         return "xai"
+    if _has_volcengine_stt_credentials(stt_config):
+        logger.info("No local STT available, using Volcengine STT API")
+        return "volcengine"
     return "none"
 
 # ---------------------------------------------------------------------------
@@ -682,6 +704,125 @@ def _transcribe_mistral(file_path: str, model_name: str) -> Dict[str, Any]:
         return {"success": False, "transcript": "", "error": f"Mistral transcription failed: {type(e).__name__}"}
 
 
+def _detect_volcengine_audio_format(audio_path: Path) -> tuple[str, Optional[str]]:
+    ext = audio_path.suffix.lower().lstrip(".")
+    if ext in {"mpeg", "mpga"}:
+        return "mp3", None
+    if ext == "ogg":
+        return "ogg", "opus"
+    if ext in {"wav", "mp3", "mp4"}:
+        return ext, None
+    return ext or "wav", None
+
+
+def _transcribe_volcengine(file_path: str, model_name: str) -> Dict[str, Any]:
+    """Transcribe via Volcengine's fast file-recognition STT API.
+
+    Hermes has a local audio file at this stage, so the one-shot flash HTTP API
+    is a better fit than the streaming websocket API.
+    """
+    try:
+        credentials = _resolve_volcengine_stt_credentials()
+    except ValueError as exc:
+        return {"success": False, "transcript": "", "error": str(exc)}
+
+    volc_cfg = _load_stt_config().get("volcengine", {})
+    audio_path = Path(file_path)
+    resource_id = str(volc_cfg.get("resource_id") or DEFAULT_VOLCENGINE_STT_RESOURCE_ID).strip()
+    uid = str(volc_cfg.get("uid") or credentials.get("app_key") or "hermes").strip()
+    language = str(volc_cfg.get("language") or "").strip()
+    service_url = str(volc_cfg.get("base_url") or VOLCENGINE_STT_BASE_URL).strip()
+    audio_format, codec = _detect_volcengine_audio_format(audio_path)
+
+    headers = {
+        "Content-Type": "application/json",
+        "X-Api-Resource-Id": resource_id,
+        "X-Api-Request-Id": str(uuid.uuid4()),
+        "X-Api-Sequence": "-1",
+    }
+    if credentials["auth_mode"] == "api_key":
+        headers["X-Api-Key"] = credentials["api_key"]
+    else:
+        headers["X-Api-App-Key"] = credentials["app_key"]
+        headers["X-Api-Access-Key"] = credentials["access_key"]
+
+    request_audio: dict[str, Any] = {
+        "data": base64.b64encode(audio_path.read_bytes()).decode("utf-8"),
+        "format": audio_format,
+    }
+    if codec:
+        request_audio["codec"] = codec
+    if language:
+        request_audio["language"] = language
+
+    payload = {
+        "user": {"uid": uid},
+        "audio": request_audio,
+        "request": {"model_name": model_name or DEFAULT_VOLCENGINE_STT_MODEL},
+    }
+
+    try:
+        import httpx
+
+        response = httpx.post(service_url, headers=headers, json=payload, timeout=60.0)
+        response.raise_for_status()
+        data = response.json()
+        status_code = str(response.headers.get("X-Api-Status-Code") or "")
+        status_message = str(response.headers.get("X-Api-Message") or "").strip()
+        logid = str(response.headers.get("X-Tt-Logid") or "").strip()
+        if status_code and status_code != "20000000":
+            error = f"Volcengine STT failed: {status_code}"
+            if status_message:
+                error += f" ({status_message})"
+            if logid:
+                error += f", logid={logid}"
+            return {"success": False, "transcript": "", "error": error}
+
+        transcript_text = str(((data or {}).get("result") or {}).get("text") or "").strip()
+        if not transcript_text:
+            return {
+                "success": False,
+                "transcript": "",
+                "error": "Volcengine STT returned no transcript text",
+            }
+
+        logger.info(
+            "Transcribed %s via Volcengine STT (%s, %d chars)",
+            audio_path.name, model_name, len(transcript_text),
+        )
+        return {"success": True, "transcript": transcript_text, "provider": "volcengine"}
+    except PermissionError:
+        return {"success": False, "transcript": "", "error": f"Permission denied: {file_path}"}
+    except Exception as e:
+        try:
+            import httpx
+
+            if isinstance(e, httpx.HTTPStatusError) and e.response is not None:
+                response = e.response
+                logid = str(response.headers.get("X-Tt-Logid") or "").strip()
+                status_code = str(response.headers.get("X-Api-Status-Code") or "").strip()
+                status_message = str(response.headers.get("X-Api-Message") or "").strip()
+                body_text = response.text.strip()
+                if len(body_text) > 500:
+                    body_text = body_text[:500] + "..."
+                logger.error(
+                    "Volcengine STT HTTP %s, api_status=%s, api_message=%s, logid=%s, body=%s",
+                    response.status_code,
+                    status_code or "-",
+                    status_message or "-",
+                    logid or "-",
+                    body_text or "-",
+                )
+        except Exception:
+            pass
+        logger.error("Volcengine transcription failed: %s", e, exc_info=True)
+        return {
+            "success": False,
+            "transcript": "",
+            "error": f"Volcengine transcription failed: {type(e).__name__}",
+        }
+
+
 # ---------------------------------------------------------------------------
 # Provider: xAI (Grok STT API)
 # ---------------------------------------------------------------------------
@@ -792,7 +933,7 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
 
     Provider priority:
       1. User config (``stt.provider`` in config.yaml)
-      2. Auto-detect: local faster-whisper (free) > Groq (free tier) > OpenAI (paid)
+      2. Auto-detect: local faster-whisper (free) > Groq (free tier) > OpenAI (paid) > Mistral > Volcengine
 
     Args:
         file_path: Absolute path to the audio file to transcribe.
@@ -854,6 +995,11 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
         model_name = model or "grok-stt"
         return _transcribe_xai(file_path, model_name)
 
+    if provider == "volcengine":
+        volc_cfg = stt_config.get("volcengine", {})
+        model_name = model or volc_cfg.get("model", DEFAULT_VOLCENGINE_STT_MODEL)
+        return _transcribe_volcengine(file_path, model_name)
+
     # No provider available
     return {
         "success": False,
@@ -862,7 +1008,9 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
             "No STT provider available. Install faster-whisper for free local "
             f"transcription, configure {LOCAL_STT_COMMAND_ENV} or install a local whisper CLI, "
             "set GROQ_API_KEY for free Groq Whisper, set MISTRAL_API_KEY for Mistral "
-            "Voxtral Transcribe, set XAI_API_KEY for xAI Grok STT, or set VOICE_TOOLS_OPENAI_KEY "
+            "Voxtral Transcribe, set XAI_API_KEY for xAI Grok STT, "
+            "set VOLCENGINE_STT_API_KEY or VOLCENGINE_STT_APP_KEY + "
+            "VOLCENGINE_STT_ACCESS_KEY for Volcengine STT, or set VOICE_TOOLS_OPENAI_KEY " 
             "or OPENAI_API_KEY for the OpenAI Whisper API."
         ),
     }

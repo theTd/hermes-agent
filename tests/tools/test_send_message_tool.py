@@ -78,6 +78,194 @@ def _ensure_slack_mock(monkeypatch):
 
 
 class TestSendMessageTool:
+    def test_sends_to_explicit_napcat_group_target(self):
+        napcat_cfg = SimpleNamespace(enabled=True, token="tok", extra={"ws_url": "ws://127.0.0.1:3001/"})
+        config = SimpleNamespace(
+            platforms={Platform.NAPCAT: napcat_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "napcat:group:123456",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.NAPCAT,
+            napcat_cfg,
+            "group:123456",
+            "hello",
+            thread_id=None,
+            media_files=[],
+        )
+        mirror_mock.assert_called_once_with(
+            "napcat",
+            "group:123456",
+            "hello",
+            source_label="cli",
+            thread_id=None,
+            preferred_user_id=None,
+            broadcast=True,
+        )
+
+    def test_passes_session_user_id_to_mirror(self):
+        napcat_cfg = SimpleNamespace(enabled=True, token="tok", extra={"ws_url": "ws://127.0.0.1:3001/"})
+        config = SimpleNamespace(
+            platforms={Platform.NAPCAT: napcat_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})), \
+             patch("gateway.session_context.get_session_env", side_effect=lambda name, default="": {
+                 "HERMES_SESSION_PLATFORM": "napcat",
+                 "HERMES_SESSION_USER_ID": "100000002",
+             }.get(name, default)), \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "napcat:group:100000001",
+                        "message": "Cross-session test",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        mirror_mock.assert_called_once_with(
+            "napcat",
+            "group:100000001",
+            "Cross-session test",
+            source_label="napcat",
+            thread_id=None,
+            preferred_user_id="100000002",
+            broadcast=True,
+        )
+
+    def test_resolves_bare_numeric_napcat_target_via_directory(self):
+        napcat_cfg = SimpleNamespace(enabled=True, token="tok", extra={"ws_url": "ws://127.0.0.1:3001/"})
+        config = SimpleNamespace(
+            platforms={Platform.NAPCAT: napcat_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("gateway.channel_directory.load_directory", return_value={
+                 "platforms": {
+                     "napcat": [
+                         {"id": "group:100000001", "name": "TestGroupChat", "type": "group"},
+                     ]
+                 }
+             }), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "napcat:100000001",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.NAPCAT,
+            napcat_cfg,
+            "group:100000001",
+            "hello",
+            thread_id=None,
+            media_files=[],
+        )
+
+    def test_resolves_napcat_group_name_via_live_group_list_fallback(self):
+        napcat_cfg = SimpleNamespace(enabled=True, token="tok", extra={"ws_url": "ws://127.0.0.1:3001/"})
+        config = SimpleNamespace(
+            platforms={Platform.NAPCAT: napcat_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("gateway.channel_directory.resolve_channel_name", return_value=None), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch(
+                 "gateway.platforms.napcat.call_napcat_action_once",
+                 new=AsyncMock(return_value={
+                     "status": "ok",
+                     "retcode": 0,
+                     "data": [{"group_id": "100000001", "group_name": "TestGroupChat"}],
+                 }),
+             ), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "napcat:TestGroupSimilar",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.NAPCAT,
+            napcat_cfg,
+            "group:100000001",
+            "hello",
+            thread_id=None,
+            media_files=[],
+        )
+
+    def test_uses_profile_aware_config_path_in_not_configured_error(self):
+        disabled_cfg = SimpleNamespace(enabled=False, token="tok", extra={})
+        config = SimpleNamespace(
+            platforms={Platform.NAPCAT: disabled_cfg},
+            get_home_channel=lambda _platform: None,
+        )
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("tools.send_message_tool.display_hermes_home", return_value="~/.hermes/profiles/coder"):
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "napcat:group:123456",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["error"] == (
+            "Platform 'napcat' is not configured. "
+            "Set up credentials in ~/.hermes/profiles/coder/config.yaml or environment variables."
+        )
+
+    def test_tool_module_no_longer_inlines_napcat_one_shot_details(self):
+        src = Path("tools/send_message_tool.py").read_text(encoding="utf-8")
+        assert "call_napcat_action_once" not in src
+        assert "map_napcat_file_path" not in src
+        assert "map_napcat_local_path" not in src
+        assert "base64://" not in src
+
     def test_cron_duplicate_target_is_skipped_and_explained(self):
         home = SimpleNamespace(chat_id="-1001")
         config, _telegram_cfg = _make_config()
@@ -112,6 +300,136 @@ class TestSendMessageTool:
         assert "final response" in result["note"]
         send_mock.assert_not_awaited()
         mirror_mock.assert_not_called()
+
+    def test_cron_different_target_still_sends(self):
+        config, telegram_cfg = _make_config()
+
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "telegram",
+                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "-1001",
+            },
+            clear=False,
+        ), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:-1002",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert result.get("skipped") is not True
+        send_mock.assert_awaited_once_with(
+            Platform.TELEGRAM,
+            telegram_cfg,
+            "-1002",
+            "hello",
+            thread_id=None,
+            media_files=[],
+        )
+        mirror_mock.assert_called_once_with(
+            "telegram",
+            "-1002",
+            "hello",
+            source_label="cli",
+            thread_id=None,
+            preferred_user_id=None,
+            broadcast=False,
+        )
+
+    def test_cron_same_chat_different_thread_still_sends(self):
+        config, telegram_cfg = _make_config()
+
+        with patch.dict(
+            os.environ,
+            {
+                "HERMES_CRON_AUTO_DELIVER_PLATFORM": "telegram",
+                "HERMES_CRON_AUTO_DELIVER_CHAT_ID": "-1001",
+                "HERMES_CRON_AUTO_DELIVER_THREAD_ID": "17585",
+            },
+            clear=False,
+        ), \
+             patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:-1001:99999",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        assert result.get("skipped") is not True
+        send_mock.assert_awaited_once_with(
+            Platform.TELEGRAM,
+            telegram_cfg,
+            "-1001",
+            "hello",
+            thread_id="99999",
+            media_files=[],
+        )
+        mirror_mock.assert_called_once_with(
+            "telegram",
+            "-1001",
+            "hello",
+            source_label="cli",
+            thread_id="99999",
+            preferred_user_id=None,
+            broadcast=False,
+        )
+
+    def test_sends_to_explicit_telegram_topic_target(self):
+        config, telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:-1001:17585",
+                        "message": "hello",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.TELEGRAM,
+            telegram_cfg,
+            "-1001",
+            "hello",
+            thread_id="17585",
+            media_files=[],
+        )
+        mirror_mock.assert_called_once_with(
+            "telegram",
+            "-1001",
+            "hello",
+            source_label="cli",
+            thread_id="17585",
+            preferred_user_id=None,
+            broadcast=False,
+        )
 
     def test_resolved_telegram_topic_name_preserves_thread_id(self):
         config, telegram_cfg = _make_config()
@@ -210,8 +528,38 @@ class TestSendMessageTool:
             "hello",
             source_label="telegram",
             thread_id=None,
-            user_id="user-123",
+            preferred_user_id="user-123",
+            broadcast=False,
         )
+
+    def test_media_only_message_does_not_mirror_placeholder_text(self):
+        config, telegram_cfg = _make_config()
+
+        with patch("gateway.config.load_gateway_config", return_value=config), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch("model_tools._run_async", side_effect=_run_async_immediately), \
+             patch("tools.send_message_tool._send_to_platform", new=AsyncMock(return_value={"success": True})) as send_mock, \
+             patch("gateway.mirror.mirror_to_session", return_value=True) as mirror_mock:
+            result = json.loads(
+                send_message_tool(
+                    {
+                        "action": "send",
+                        "target": "telegram:-1001",
+                        "message": "MEDIA:/tmp/example.ogg",
+                    }
+                )
+            )
+
+        assert result["success"] is True
+        send_mock.assert_awaited_once_with(
+            Platform.TELEGRAM,
+            telegram_cfg,
+            "-1001",
+            "",
+            thread_id=None,
+            media_files=[("/tmp/example.ogg", False)],
+        )
+        mirror_mock.assert_not_called()
 
     def test_top_level_send_failure_redacts_query_token(self):
         config, _telegram_cfg = _make_config()
@@ -621,6 +969,226 @@ class TestSendToPlatformWhatsapp:
 
         assert result["success"] is True
         async_mock.assert_awaited_once_with({"bridge_port": 3000}, chat_id, "hello from hermes")
+
+
+class TestSendToPlatformNapCat:
+    @staticmethod
+    def _make_helper(result):
+        return SimpleNamespace(send_one_shot=AsyncMock(return_value=result))
+
+    @pytest.mark.asyncio
+    async def test_napcat_routes_via_short_lived_ws_sender(self):
+        cfg = SimpleNamespace(enabled=True, token="tok", extra={"ws_url": "ws://127.0.0.1:3001/"})
+        helper = self._make_helper({"success": True})
+
+        with patch("tools.send_message_tool.build_platform_tool_helper", return_value=helper) as build_helper:
+            result = await _send_to_platform(
+                Platform.NAPCAT,
+                cfg,
+                "group:123456",
+                "hello from hermes",
+            )
+
+        assert result["success"] is True
+        build_helper.assert_called_once_with(Platform.NAPCAT, cfg)
+        helper.send_one_shot.assert_awaited_once_with(
+            "group:123456",
+            "hello from hermes",
+            media_files=[],
+            thread_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_napcat_sends_document_attachment_via_file_segment(self, tmp_path):
+        cfg = SimpleNamespace(enabled=True, token="tok", extra={"ws_url": "ws://127.0.0.1:3001/"})
+        doc_path = tmp_path / "report.pdf"
+        doc_path.write_bytes(b"%PDF-1.4")
+        helper = self._make_helper({"success": True, "message_id": "9"})
+
+        with patch("tools.send_message_tool.build_platform_tool_helper", return_value=helper):
+            result = await _send_to_platform(
+                Platform.NAPCAT,
+                cfg,
+                "group:123456",
+                "report attached",
+                media_files=[(str(doc_path), False)],
+            )
+
+        assert result["success"] is True
+        helper.send_one_shot.assert_awaited_once_with(
+            "group:123456",
+            "report attached",
+            media_files=[(str(doc_path), False)],
+            thread_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_napcat_document_attachment_applies_path_mapping(self, tmp_path):
+        shared_dir = tmp_path / "shared"
+        shared_dir.mkdir()
+        doc_path = shared_dir / "report.pdf"
+        doc_path.write_bytes(b"%PDF-1.4")
+        cfg = SimpleNamespace(
+            enabled=True,
+            token="tok",
+            extra={
+                "ws_url": "ws://127.0.0.1:3001/",
+                "file_path_map": [
+                    {
+                        "host_prefix": str(shared_dir),
+                        "container_prefix": "/host-share",
+                    }
+                ],
+            },
+        )
+        helper = self._make_helper({"success": True, "message_id": "11"})
+
+        with patch("tools.send_message_tool.build_platform_tool_helper", return_value=helper):
+            result = await _send_to_platform(
+                Platform.NAPCAT,
+                cfg,
+                "group:123456",
+                "",
+                media_files=[(str(doc_path), False)],
+            )
+
+        assert result["success"] is True
+        helper.send_one_shot.assert_awaited_once_with(
+            "group:123456",
+            "",
+            media_files=[(str(doc_path), False)],
+            thread_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_napcat_sends_audio_attachment_as_record_segment(self, tmp_path):
+        cfg = SimpleNamespace(enabled=True, token="tok", extra={"ws_url": "ws://127.0.0.1:3001/"})
+        audio_path = tmp_path / "voice.ogg"
+        audio_path.write_bytes(b"OggS" + b"\x00" * 16)
+        helper = self._make_helper({"success": True, "message_id": "10"})
+
+        with patch("tools.send_message_tool.build_platform_tool_helper", return_value=helper):
+            result = await _send_to_platform(
+                Platform.NAPCAT,
+                cfg,
+                "private:10001",
+                "",
+                media_files=[(str(audio_path), True)],
+            )
+
+        assert result["success"] is True
+        helper.send_one_shot.assert_awaited_once_with(
+            "private:10001",
+            "",
+            media_files=[(str(audio_path), True)],
+            thread_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_napcat_sends_image_attachment_as_image_path_segment(self, tmp_path):
+        cfg = SimpleNamespace(enabled=True, token="tok", extra={"ws_url": "ws://127.0.0.1:3001/"})
+        image_path = tmp_path / "chart.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        helper = self._make_helper({"success": True, "message_id": "12"})
+
+        with patch("tools.send_message_tool.build_platform_tool_helper", return_value=helper):
+            result = await _send_to_platform(
+                Platform.NAPCAT,
+                cfg,
+                "private:10001",
+                "",
+                media_files=[(str(image_path), False)],
+            )
+
+        assert result["success"] is True
+        helper.send_one_shot.assert_awaited_once_with(
+            "private:10001",
+            "",
+            media_files=[(str(image_path), False)],
+            thread_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_napcat_image_attachment_applies_path_mapping(self, tmp_path):
+        shared_dir = tmp_path / "shared"
+        shared_dir.mkdir()
+        image_path = shared_dir / "chart.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        cfg = SimpleNamespace(
+            enabled=True,
+            token="tok",
+            extra={
+                "ws_url": "ws://127.0.0.1:3001/",
+                "file_path_map": [
+                    {
+                        "host_prefix": str(shared_dir),
+                        "container_prefix": "/host-share",
+                    }
+                ],
+            },
+        )
+        helper = self._make_helper({"success": True, "message_id": "13"})
+
+        with patch("tools.send_message_tool.build_platform_tool_helper", return_value=helper):
+            result = await _send_to_platform(
+                Platform.NAPCAT,
+                cfg,
+                "private:10001",
+                "",
+                media_files=[(str(image_path), False)],
+            )
+
+        assert result["success"] is True
+        helper.send_one_shot.assert_awaited_once_with(
+            "private:10001",
+            "",
+            media_files=[(str(image_path), False)],
+            thread_id=None,
+        )
+
+    @pytest.mark.asyncio
+    async def test_napcat_image_attachment_stages_unmapped_path_into_shared_dir(self, tmp_path, monkeypatch):
+        mounted_root = tmp_path / "mounted"
+        mounted_root.mkdir()
+        hermes_home = mounted_root / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        image_path = outside_dir / "chart.png"
+        image_path.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
+        cfg = SimpleNamespace(
+            enabled=True,
+            token="tok",
+            extra={
+                "ws_url": "ws://127.0.0.1:3001/",
+                "file_path_map": [
+                    {
+                        "host_prefix": str(mounted_root),
+                        "container_prefix": "/host-share",
+                    }
+                ],
+            },
+        )
+        helper = self._make_helper({"success": True, "message_id": "14"})
+
+        with patch("tools.send_message_tool.build_platform_tool_helper", return_value=helper):
+            result = await _send_to_platform(
+                Platform.NAPCAT,
+                cfg,
+                "private:10001",
+                "",
+                media_files=[(str(image_path), False)],
+            )
+
+        assert result["success"] is True
+        helper.send_one_shot.assert_awaited_once_with(
+            "private:10001",
+            "",
+            media_files=[(str(image_path), False)],
+            thread_id=None,
+        )
 
 
 class TestSendTelegramHtmlDetection:

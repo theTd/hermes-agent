@@ -1617,7 +1617,10 @@ class WeixinAdapter(BasePlatformAdapter):
 
         # Extract MEDIA: tags and bare local file paths before text delivery.
         media_files, cleaned_content = self.extract_media(content)
-        _, image_cleaned = self.extract_images(cleaned_content)
+        _, image_cleaned = self.extract_images(
+            cleaned_content,
+            extra_domains=self.config.extra.get("image_url_domains"),
+        )
         local_files, final_content = self.extract_local_files(image_cleaned)
 
         _AUDIO_EXTS = {".ogg", ".opus", ".mp3", ".wav", ".m4a", ".flac"}

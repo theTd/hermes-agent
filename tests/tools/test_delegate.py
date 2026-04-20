@@ -415,8 +415,11 @@ class TestDelegateObservability(unittest.TestCase):
         with patch("run_agent.AIAgent") as MockAgent:
             mock_child = MagicMock()
             mock_child.model = "claude-sonnet-4-6"
-            mock_child.session_prompt_tokens = 5000
-            mock_child.session_completion_tokens = 1200
+            mock_child.session_input_tokens = 5000
+            mock_child.session_output_tokens = 1200
+            mock_child.session_cache_read_tokens = 300
+            mock_child.session_cache_write_tokens = 50
+            mock_child.session_reasoning_tokens = 700
             mock_child.run_conversation.return_value = {
                 "final_response": "done",
                 "completed": True,
@@ -441,6 +444,10 @@ class TestDelegateObservability(unittest.TestCase):
             self.assertEqual(entry["exit_reason"], "completed")
             self.assertEqual(entry["tokens"]["input"], 5000)
             self.assertEqual(entry["tokens"]["output"], 1200)
+            self.assertEqual(entry["tokens"]["cache_read"], 300)
+            self.assertEqual(entry["tokens"]["cache_write"], 50)
+            self.assertEqual(entry["tokens"]["reasoning"], 700)
+            self.assertEqual(entry["tokens"]["total"], 6550)
 
             # Tool trace
             self.assertEqual(len(entry["tool_trace"]), 1)

@@ -3,8 +3,17 @@
 import json
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from gateway.config import Platform
+from gateway.platform_helpers import (
+    build_platform_tool_helper,
+    get_helper_one_shot_platform_names,
+    get_tool_platform_names,
+    resolve_tool_platform,
+    uses_helper_one_shot,
+)
 from tools.registry import ToolRegistry, discover_builtin_tools
 
 
@@ -18,6 +27,37 @@ def _make_schema(name="test_tool"):
         "description": f"A {name}",
         "parameters": {"type": "object", "properties": {}},
     }
+
+
+class TestPlatformHelpers:
+    def test_resolve_tool_platform_uses_shared_registry(self):
+        assert resolve_tool_platform("napcat") == Platform.NAPCAT
+        assert resolve_tool_platform("telegram") == Platform.TELEGRAM
+        assert resolve_tool_platform("unknown") is None
+
+    def test_tool_platform_names_include_registered_tool_targets(self):
+        names = get_tool_platform_names()
+        assert "napcat" in names
+        assert "telegram" in names
+        assert "wecom_callback" in names
+
+    def test_helper_one_shot_platform_registry_tracks_napcat(self):
+        assert uses_helper_one_shot(Platform.NAPCAT) is True
+        assert uses_helper_one_shot(Platform.TELEGRAM) is False
+        assert get_helper_one_shot_platform_names() == ["napcat"]
+
+    def test_build_platform_tool_helper_creates_napcat_adapter(self):
+        fake_config = SimpleNamespace(enabled=True, token="tok", extra={"ws_url": "ws://127.0.0.1:3001/"})
+
+        with patch("gateway.platforms.napcat.NapCatAdapter", return_value="helper") as adapter_cls:
+            helper = build_platform_tool_helper(Platform.NAPCAT, fake_config)
+
+        assert helper == "helper"
+        adapter_cls.assert_called_once_with(fake_config)
+
+    def test_build_platform_tool_helper_uses_registry_lookup_without_platform_branching(self):
+        src = Path("gateway/platform_helpers.py").read_text(encoding="utf-8")
+        assert "if platform == Platform.NAPCAT" not in src
 
 
 class TestRegisterAndDispatch:
@@ -307,6 +347,8 @@ class TestBuiltinDiscovery:
             "tools.kanban_tools",
             "tools.memory_tool",
             "tools.mixture_of_agents_tool",
+            "tools.napcat_admin_tool",
+            "tools.napcat_history_tool",
             "tools.process_registry",
             "tools.rl_training_tool",
             "tools.send_message_tool",

@@ -79,6 +79,27 @@ def _build_copilot_agent(monkeypatch, *, model="gpt-5.4"):
     return agent
 
 
+def _build_volcengine_responses_agent(monkeypatch, *, model="doubao-seed-1-8-251228"):
+    _patch_agent_bootstrap(monkeypatch)
+
+    agent = run_agent.AIAgent(
+        model=model,
+        provider="custom",
+        api_mode="codex_responses",
+        base_url="https://ark.cn-beijing.volces.com/api/v3",
+        api_key="volc-token",
+        quiet_mode=True,
+        max_iterations=4,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    agent._cleanup_task_resources = lambda task_id: None
+    agent._persist_session = lambda messages, history=None: None
+    agent._save_trajectory = lambda messages, user_message, completed: None
+    agent._save_session_log = lambda messages: None
+    return agent
+
+
 def _codex_message_response(text: str):
     return SimpleNamespace(
         output=[
@@ -396,6 +417,16 @@ def test_build_api_kwargs_copilot_responses_omits_reasoning_for_non_reasoning_mo
     assert "reasoning" not in kwargs
     assert "include" not in kwargs
     assert "prompt_cache_key" not in kwargs
+
+
+def test_build_api_kwargs_volcengine_responses_omits_reasoning_summary(monkeypatch):
+    agent = _build_volcengine_responses_agent(monkeypatch)
+    kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+    assert kwargs["reasoning"] == {"effort": "medium"}
+    assert kwargs["include"] == ["reasoning.encrypted_content"]
+    assert isinstance(kwargs["prompt_cache_key"], str)
+    assert len(kwargs["prompt_cache_key"]) > 0
 
 
 def test_run_codex_stream_retries_when_completed_event_missing(monkeypatch):
@@ -1115,6 +1146,25 @@ def test_interim_commentary_is_not_marked_already_streamed_when_stream_callback_
     }
 
 
+def test_interim_commentary_is_not_marked_already_streamed_when_tracking_disabled(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    observed = {}
+
+    agent.stream_delta_callback = lambda _text: None
+    agent._track_streamed_assistant_text = False
+    agent._fire_stream_delta("short version: yes")
+    agent.interim_assistant_callback = lambda text, *, already_streamed=False: observed.update(
+        {"text": text, "already_streamed": already_streamed}
+    )
+
+    agent._emit_interim_assistant_message({"role": "assistant", "content": "short version: yes"})
+
+    assert observed == {
+        "text": "short version: yes",
+        "already_streamed": False,
+    }
+
+
 def test_interim_commentary_preserves_assistant_content(monkeypatch):
     """Interim commentary must not silently mutate assistant text containing
     literal <memory-context> markers — that's legitimate model output (docs,
@@ -1401,6 +1451,42 @@ def test_dump_api_request_debug_uses_chat_completions_url(monkeypatch, tmp_path)
 
     payload = json.loads(dump_file.read_text())
     assert payload["request"]["url"] == "http://127.0.0.1:9208/v1/chat/completions"
+
+
+def test_dump_api_request_debug_uses_anthropic_api_key_fallback(monkeypatch, tmp_path):
+    """Anthropic-mode debug dumps should use the active Anthropic key even without self.client."""
+    import json
+
+    _patch_agent_bootstrap(monkeypatch)
+
+    class _FakeAnthropicClient:
+        pass
+
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.build_anthropic_client",
+        lambda api_key, base_url=None: _FakeAnthropicClient(),
+    )
+
+    agent = run_agent.AIAgent(
+        model="MiniMax-M2.7-highspeed",
+        provider="minimax-cn",
+        api_mode="anthropic_messages",
+        base_url="https://api.minimaxi.com/anthropic",
+        api_key="sk-mmcn-test-123456",
+        quiet_mode=True,
+        max_iterations=1,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+    agent.logs_dir = tmp_path
+
+    dump_file = agent._dump_api_request_debug(
+        {"model": "MiniMax-M2.7-highspeed", "messages": [{"role": "user", "content": "hi"}]},
+        reason="preflight",
+    )
+
+    payload = json.loads(dump_file.read_text())
+    assert payload["request"]["headers"]["Authorization"] == "Bearer sk-mmcn-...3456"
 
 
 # --- Reasoning-only response tests (fix for empty content retry loop) ---

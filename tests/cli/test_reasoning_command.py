@@ -638,8 +638,7 @@ class TestReasoningDeltasFiredFlag(unittest.TestCase):
         captured = []
         agent.reasoning_callback = lambda t: captured.append(t)
         agent.stream_delta_callback = lambda t: None  # streaming is active
-
-        # Simulate streaming having already fired reasoning
+        agent._current_streamed_reasoning_text = "Let me merge the PR."
 
         msg = SimpleNamespace(
             content="I'll merge that.",
@@ -654,17 +653,13 @@ class TestReasoningDeltasFiredFlag(unittest.TestCase):
         self.assertEqual(captured, [])
 
     def test_build_assistant_message_skips_callback_when_streaming_active(self):
-        """When streaming is active, callback should NEVER fire from
-        _build_assistant_message — reasoning was already displayed during the
-        stream (either via reasoning_content deltas or content tag extraction).
-        Any missed reasoning is caught by the CLI post-response fallback."""
+        """When streaming produced only part of the reasoning, emit just the
+        missing suffix from the final assistant message."""
         agent = self._make_agent()
         captured = []
         agent.reasoning_callback = lambda t: captured.append(t)
         agent.stream_delta_callback = lambda t: None  # streaming active
-
-        # Reasoning came through content tags, not reasoning_content deltas.
-        # Callback should not fire since streaming is active.
+        agent._current_streamed_reasoning_text = "Let me"
 
         msg = SimpleNamespace(
             content="I'll merge that.",
@@ -675,8 +670,7 @@ class TestReasoningDeltasFiredFlag(unittest.TestCase):
         )
         agent._build_assistant_message(msg, "stop")
 
-        # Callback should NOT fire — streaming is active
-        self.assertEqual(captured, [])
+        self.assertEqual(captured, [" merge the PR."])
 
     def test_build_assistant_message_fires_callback_without_streaming(self):
         """When no streaming is active, callback always fires for structured

@@ -25,6 +25,7 @@ import base64
 import concurrent.futures
 import contextvars
 import copy
+from dataclasses import dataclass  # kept for re-export; actual usage via agent.runtime_context
 import hashlib
 import json
 import logging
@@ -172,9 +173,53 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
+from agent.napcat_agent_instrumentation import *
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
 from hermes_cli.config import cfg_get
 
+
+# Thin wrappers for observability that bind module-level vars at call time
+# so monkeypatch-based tests can override _emit_observability_event etc.
+def _begin_agent_llm_observation(agent, api_kwargs: dict, *, streaming: bool = False):
+    return _begin_llm_request_observation(
+        api_kwargs,
+        model=getattr(agent, "model", None),
+        provider=getattr(agent, "provider", None),
+        api_mode=getattr(agent, "api_mode", None),
+        streaming=streaming,
+        obs_available=_OBSERVABILITY_ENABLED,
+        current_trace=_current_observability_trace,
+        fallback_getter=_default_trace_ctx,
+        begin_request_fn=_begin_observability_llm_request,
+        emit_event_fn=_emit_observability_event,
+        event_type_cls=_ObservabilityEventType,
+    )
+
+
+def _finish_agent_llm_observation(
+    agent,
+    observation,
+    *,
+    success: bool,
+    usage=None,
+    error=None,
+    emit_event_fn=None,
+):
+    return _finish_llm_request_observation(
+        observation,
+        model=getattr(agent, "model", None),
+        provider=getattr(agent, "provider", None),
+        base_url=getattr(agent, "base_url", None),
+        api_mode=getattr(agent, "api_mode", None),
+        api_key=getattr(agent, "api_key", "") or "",
+        success=success,
+        usage=usage,
+        error=error,
+        end_request_fn=_end_observability_llm_request,
+        emit_event_fn=emit_event_fn if emit_event_fn is not None else _emit_observability_event,
+        event_type_cls=_ObservabilityEventType,
+        severity_cls=_ObservabilitySeverity,
+    )
 
 
 class _SafeWriter:
@@ -937,13 +982,7 @@ class AIAgent:
         request_overrides: Dict[str, Any] = None,
         prefill_messages: List[Dict[str, Any]] = None,
         platform: str = None,
-        user_id: str = None,
-        user_name: str = None,
-        chat_id: str = None,
-        chat_name: str = None,
-        chat_type: str = None,
-        thread_id: str = None,
-        gateway_session_key: str = None,
+        runtime_context: AgentRuntimeContext | None = None,
         skip_context_files: bool = False,
         load_soul_identity: bool = False,
         skip_memory: bool = False,
@@ -955,6 +994,8 @@ class AIAgent:
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
+        persist_session: bool = True,
+        split_session_on_compress: bool = True,
     ):
         """
         Initialize the AI Agent.
@@ -1014,13 +1055,7 @@ class AIAgent:
         self.quiet_mode = quiet_mode
         self.ephemeral_system_prompt = ephemeral_system_prompt
         self.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
-        self._user_id = user_id  # Platform user identifier (gateway sessions)
-        self._user_name = user_name
-        self._chat_id = chat_id
-        self._chat_name = chat_name
-        self._chat_type = chat_type
-        self._thread_id = thread_id
-        self._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+        self.runtime_context = AgentRuntimeContext.resolve(runtime_context=runtime_context)
         # Pluggable print function — CLI replaces this with _cprint so that
         # raw ANSI status lines are routed through prompt_toolkit's renderer
         # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -1030,6 +1065,9 @@ class AIAgent:
         self.skip_context_files = skip_context_files
         self.load_soul_identity = load_soul_identity
         self.pass_session_id = pass_session_id
+        self.persist_session = persist_session
+        self.split_session_on_compress = bool(split_session_on_compress)
+        self._force_session_log_overwrite = False
         self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
@@ -1296,6 +1334,11 @@ class AIAgent:
         # commentary when the provider later returns it as a completed interim
         # assistant message.
         self._current_streamed_assistant_text = ""
+        # Reasoning text already delivered through live callbacks during the
+        # current model response. Used to avoid duplicating final reasoning
+        # while still allowing a fallback when providers only expose it at
+        # message-finalization time.
+        self._current_streamed_reasoning_text = ""
 
         # Optional current-turn user-message override used when the API-facing
         # user message intentionally differs from the persisted transcript
@@ -1642,7 +1685,7 @@ class AIAgent:
                         "reasoning_config": reasoning_config,
                         "max_tokens": max_tokens,
                     },
-                    user_id=None,
+                    user_id=getattr(self.runtime_context, "user_id", None),
                     parent_session_id=self._parent_session_id,
                 )
             except Exception as e:
@@ -1659,7 +1702,7 @@ class AIAgent:
         # In-memory todo list for task planning (one per agent/session)
         from tools.todo_tool import TodoStore
         self._todo_store = TodoStore()
-        
+
         # Load config once for memory, skills, and compression sections
         try:
             from hermes_cli.config import load_config as _load_agent_config
@@ -1689,6 +1732,12 @@ class AIAgent:
                     self._memory_store = MemoryStore(
                         memory_char_limit=mem_config.get("memory_char_limit", 2200),
                         user_char_limit=mem_config.get("user_char_limit", 1375),
+                        chat_char_limit=mem_config.get("chat_char_limit", mem_config.get("memory_char_limit", 2200)),
+                        platform=self.platform or "",
+                        user_id=self.runtime_context.user_id or "",
+                        chat_id=self.runtime_context.chat_id or "",
+                        chat_type=self.runtime_context.chat_type or "",
+                        thread_id=self.runtime_context.thread_id or "",
                     )
                     self._memory_store.load_from_disk()
             except Exception:
@@ -1711,12 +1760,12 @@ class AIAgent:
                     if _mp and _mp.is_available():
                         self._memory_manager.add_provider(_mp)
                     if self._memory_manager.providers:
-                        _init_kwargs = {
-                            "session_id": self.session_id,
-                            "platform": platform or "cli",
-                            "hermes_home": str(get_hermes_home()),
-                            "agent_context": "primary",
-                        }
+                        _init_kwargs = self.runtime_context.to_memory_provider_kwargs(
+                            platform=platform or "cli",
+                            hermes_home=str(get_hermes_home()),
+                            parent_session_id=self._parent_session_id,
+                        )
+                        _init_kwargs["session_id"] = self.session_id
                         # Thread session title for memory provider scoping
                         # (e.g. honcho uses this to derive chat-scoped session keys)
                         if self._session_db:
@@ -1726,27 +1775,12 @@ class AIAgent:
                                     _init_kwargs["session_title"] = _st
                             except Exception:
                                 pass
-                        # Thread gateway user identity for per-user memory scoping
-                        if self._user_id:
-                            _init_kwargs["user_id"] = self._user_id
-                        if self._user_name:
-                            _init_kwargs["user_name"] = self._user_name
-                        if self._chat_id:
-                            _init_kwargs["chat_id"] = self._chat_id
-                        if self._chat_name:
-                            _init_kwargs["chat_name"] = self._chat_name
-                        if self._chat_type:
-                            _init_kwargs["chat_type"] = self._chat_type
-                        if self._thread_id:
-                            _init_kwargs["thread_id"] = self._thread_id
-                        # Thread gateway session key for stable per-chat Honcho session isolation
-                        if self._gateway_session_key:
-                            _init_kwargs["gateway_session_key"] = self._gateway_session_key
                         # Profile identity for per-profile provider scoping
                         try:
                             from hermes_cli.profiles import get_active_profile_name
                             _profile = get_active_profile_name()
-                            _init_kwargs["agent_identity"] = _profile
+                            if _profile:
+                                _init_kwargs["agent_identity"] = _profile
                             _init_kwargs["agent_workspace"] = "hermes"
                         except Exception:
                             pass
@@ -3304,13 +3338,21 @@ class AIAgent:
     # ------------------------------------------------------------------
 
     _MEMORY_REVIEW_PROMPT = (
-        "Review the conversation above and consider saving to memory if appropriate.\n\n"
-        "Focus on:\n"
-        "1. Has the user revealed things about themselves — their persona, desires, "
-        "preferences, or personal details worth remembering?\n"
-        "2. Has the user expressed expectations about how you should behave, their work "
-        "style, or ways they want you to operate?\n\n"
-        "If something stands out, save it using the memory tool. "
+        "Internal background review. Examine the conversation above for durable memory "
+        "updates only.\n\n"
+        "Review two scopes:\n"
+        "1. USER PROFILE: stable facts about the current speaker — identity, role, "
+        "preferences, recurring corrections, expectations, workflow habits.\n"
+        "2. CHAT PROFILE: shared facts about the current group/channel/thread — project "
+        "context, participant roles, nicknames, shared norms, recurring references.\n\n"
+        "Use the memory tool with the correct target: target='user' for the current "
+        "speaker, target='chat' for shared conversation context, target='memory' only "
+        "for durable cross-chat notes. Prefer updating existing entries over creating "
+        "duplicates. If the conversation corrects or invalidates an existing memory, "
+        "use replace/remove so the wrong version no longer remains beside the corrected one. "
+        "Each memory entry must contain exactly one atomic fact. If you learn multiple facts, "
+        "save them as separate memory entries instead of bundling them together. "
+        "Do not save temporary task state, one-off jokes, or ephemeral chatter. "
         "If nothing is worth saving, just say 'Nothing to save.' and stop."
     )
 
@@ -3392,10 +3434,14 @@ class AIAgent:
 
     _COMBINED_REVIEW_PROMPT = (
         "Review the conversation above and update two things:\n\n"
-        "**Memory**: who the user is. Did the user reveal persona, "
-        "desires, preferences, personal details, or expectations about "
-        "how you should behave? Save facts about the user and durable "
-        "preferences with the memory tool.\n\n"
+        "**Memory**: who the user is. Look for durable facts in both USER PROFILE scope and CHAT PROFILE "
+        "scope. Save identity, preferences, recurring corrections, and workflow habits "
+        "to target='user'. Save project context, participant roles, nicknames, shared "
+        "norms, and recurring references to target='chat'. Use target='memory' only "
+        "for durable cross-chat notes. Prefer updating existing entries over creating "
+        "duplicates. Each memory entry must contain exactly one atomic fact; split "
+        "multiple facts into multiple entries. If a prior memory is corrected, use replace/remove so the wrong "
+        "entry does not remain in parallel with the corrected one.\n\n"
         "**Skills**: how to do this class of task. Be ACTIVE — most "
         "sessions produce at least one skill update. A pass that does "
         "nothing is a missed learning opportunity, not a neutral outcome.\n\n"
@@ -3444,6 +3490,11 @@ class AIAgent:
         "Act on whichever of the two dimensions has real signal. If "
         "genuinely nothing stands out on either, say 'Nothing to save.' "
         "and stop — but don't reach for that conclusion as a default."
+    )
+
+    _BACKGROUND_REVIEW_USER_PROMPT = (
+        "Review the conversation above and follow the system instructions. "
+        "Do not send normal assistant chatter."
     )
 
     @staticmethod
@@ -3499,13 +3550,28 @@ class AIAgent:
             elif "updated" in message.lower():
                 actions.append(message)
             elif "added" in message.lower() or (target and "add" in message.lower()):
-                label = "Memory" if target == "memory" else "User profile" if target == "user" else target
+                label = (
+                    "Memory" if target == "memory"
+                    else "User profile" if target == "user"
+                    else "Chat profile" if target == "chat"
+                    else target
+                )
                 actions.append(f"{label} updated")
             elif "Entry added" in message:
-                label = "Memory" if target == "memory" else "User profile" if target == "user" else target
+                label = (
+                    "Memory" if target == "memory"
+                    else "User profile" if target == "user"
+                    else "Chat profile" if target == "chat"
+                    else target
+                )
                 actions.append(f"{label} updated")
             elif "removed" in message.lower() or "replaced" in message.lower():
-                label = "Memory" if target == "memory" else "User profile" if target == "user" else target
+                label = (
+                    "Memory" if target == "memory"
+                    else "User profile" if target == "user"
+                    else "Chat profile" if target == "chat"
+                    else target
+                )
                 actions.append(f"{label} updated")
         return actions
 
@@ -3518,9 +3584,10 @@ class AIAgent:
         """Spawn a background thread to review the conversation for memory/skill saves.
 
         Creates a full AIAgent fork with the same model, tools, and context as the
-        main session. The review prompt is appended as the next user turn in the
-        forked conversation. Writes directly to the shared memory/skill stores.
-        Never modifies the main conversation history or produces user-visible output.
+        main session. The review instructions are injected as a system_message in the
+        forked conversation, with a tiny user trigger turn to execute the review.
+        Writes directly to the shared memory/skill stores. Never modifies the main
+        conversation history or produces user-visible output.
         """
         import threading
 
@@ -3585,7 +3652,8 @@ class AIAgent:
                     review_agent._skill_nudge_interval = 0
 
                     review_agent.run_conversation(
-                        user_message=prompt,
+                        user_message=self._BACKGROUND_REVIEW_USER_PROMPT,
+                        system_message=prompt,
                         conversation_history=messages_snapshot,
                     )
 
@@ -3705,6 +3773,10 @@ class AIAgent:
         Uses _last_flushed_db_idx to track which messages have already been
         written, so repeated calls (from multiple exit paths) only write
         truly new messages — preventing the duplicate-write bug (#860).
+
+        Also backfills any historical messages that were loaded from JSONL but
+        not yet present in SQLite, so that future loads prefer the DB source
+        and timestamps are preserved.
         """
         if not self._session_db:
             return
@@ -3718,11 +3790,25 @@ class AIAgent:
                 source=self.platform or "cli",
                 model=self.model,
             )
-            start_idx = len(conversation_history) if conversation_history else 0
-            flush_from = max(start_idx, self._last_flushed_db_idx)
-            for msg in messages[flush_from:]:
+            # Build a set of existing message keys in the DB to avoid duplicates
+            # when backfilling historical messages loaded from JSONL.
+            existing_keys: set = set()
+            try:
+                for m in self._session_db.get_messages(self.session_id):
+                    existing_keys.add(
+                        (m.get("role"), m.get("content"), m.get("tool_call_id"))
+                    )
+            except Exception:
+                pass
+
+            for msg in messages[self._last_flushed_db_idx:]:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
+                tool_call_id = msg.get("tool_call_id")
+                # Skip duplicates (e.g. historical messages already in DB)
+                if (role, content, tool_call_id) in existing_keys:
+                    continue
+                existing_keys.add((role, content, tool_call_id))
                 tool_calls_data = None
                 if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
                     tool_calls_data = [
@@ -4162,6 +4248,8 @@ class AIAgent:
                 api_key = getattr(self.client, "api_key", None)
             except Exception as e:
                 logger.debug("Could not extract API key for debug dump: %s", e)
+            if not api_key and self.api_mode == "anthropic_messages":
+                api_key = getattr(self, "_anthropic_api_key", None) or getattr(self, "api_key", None)
 
             dump_payload: Dict[str, Any] = {
                 "timestamp": datetime.now().isoformat(),
@@ -4259,7 +4347,7 @@ class AIAgent:
             # This protects against data loss when --resume loads a session whose
             # messages weren't fully written to SQLite — the resumed agent starts
             # with partial history and would otherwise clobber the full JSON log.
-            if self.session_log_file.exists():
+            if self.session_log_file.exists() and not getattr(self, "_force_session_log_overwrite", False):
                 try:
                     existing = json.loads(self.session_log_file.read_text(encoding="utf-8"))
                     existing_count = existing.get("message_count", len(existing.get("messages", [])))
@@ -4291,6 +4379,7 @@ class AIAgent:
                 indent=2,
                 default=str,
             )
+            self._force_session_log_overwrite = False
 
         except Exception as e:
             if self.verbose_logging:
@@ -4894,6 +4983,9 @@ class AIAgent:
                 mem_block = self._memory_store.format_for_system_prompt("memory")
                 if mem_block:
                     prompt_parts.append(mem_block)
+                chat_block = self._memory_store.format_for_system_prompt("chat")
+                if chat_block:
+                    prompt_parts.append(chat_block)
             # USER.md is always included when enabled.
             if self._user_profile_enabled:
                 user_block = self._memory_store.format_for_system_prompt("user")
@@ -6366,6 +6458,8 @@ class AIAgent:
         _call_start = time.time()
         self._touch_activity("waiting for non-streaming API response")
 
+        _llm_observation = _begin_agent_llm_observation(self, api_kwargs, streaming=False)
+
         t = threading.Thread(target=_call, daemon=True)
         t.start()
         _poll_count = 0
@@ -6435,7 +6529,14 @@ class AIAgent:
                     pass
                 raise InterruptedError("Agent interrupted during API call")
         if result["error"] is not None:
+            _finish_agent_llm_observation(
+                self, _llm_observation, success=False, error=result["error"],
+            )
             raise result["error"]
+        _finish_agent_llm_observation(
+            self, _llm_observation, success=True,
+            usage=getattr(result["response"], "usage", None),
+        )
         return result["response"]
 
     # ── Unified streaming API call ─────────────────────────────────────────
@@ -6457,6 +6558,7 @@ class AIAgent:
                         pass
                 self._record_streamed_assistant_text(tail)
         self._current_streamed_assistant_text = ""
+        self._current_streamed_reasoning_text = ""
 
     def _record_streamed_assistant_text(self, text: str) -> None:
         """Accumulate visible assistant text emitted through stream callbacks."""
@@ -6536,17 +6638,23 @@ class AIAgent:
                 delivered = True
             except Exception:
                 pass
-        if delivered:
+        if delivered and getattr(self, "_track_streamed_assistant_text", True):
             self._record_streamed_assistant_text(text)
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""
         cb = self.reasoning_callback
+        delivered = False
         if cb is not None:
             try:
                 cb(text)
+                delivered = True
             except Exception:
                 pass
+        if delivered and isinstance(text, str) and text:
+            self._current_streamed_reasoning_text = (
+                getattr(self, "_current_streamed_reasoning_text", "") + text
+            )
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
         """Notify display layer that the model is generating tool call arguments.
@@ -7281,6 +7389,8 @@ class AIAgent:
             else:
                 _stream_stale_timeout = _stream_stale_timeout_base
 
+        _stream_observation = _begin_agent_llm_observation(self, api_kwargs, streaming=True)
+
         t = threading.Thread(target=_call, daemon=True)
         t.start()
         _last_heartbeat = time.time()
@@ -7409,6 +7519,10 @@ class AIAgent:
                     role="assistant", content=_partial_text, tool_calls=None,
                     reasoning_content=None,
                 )
+                _finish_agent_llm_observation(
+                    self, _stream_observation, success=False, error=result["error"],
+                    emit_event_fn=lambda *args, **kwargs: False,
+                )
                 return SimpleNamespace(
                     id="partial-stream-stub",
                     model=getattr(self, "model", "unknown"),
@@ -7417,7 +7531,14 @@ class AIAgent:
                     )],
                     usage=None,
                 )
+            _finish_agent_llm_observation(
+                self, _stream_observation, success=False, error=result["error"],
+            )
             raise result["error"]
+        _finish_agent_llm_observation(
+            self, _stream_observation, success=True,
+            usage=getattr(result["response"], "usage", None),
+        )
         return result["response"]
 
     # ── Provider fallback ──────────────────────────────────────────────────
@@ -8547,9 +8668,21 @@ class AIAgent:
             # (gateway, batch, quiet) still get reasoning.
             # Any reasoning that wasn't shown during streaming is caught by the
             # CLI post-response display fallback (cli.py _reasoning_shown_this_turn).
-            if not self.stream_delta_callback and not self._stream_callback:
+            streamed_reasoning = str(
+                getattr(self, "_current_streamed_reasoning_text", "") or ""
+            )
+            streaming_active = bool(
+                self.stream_delta_callback or getattr(self, "_stream_callback", None)
+            )
+            emit_reasoning = reasoning_text
+            if streaming_active:
+                if streamed_reasoning and reasoning_text.startswith(streamed_reasoning):
+                    emit_reasoning = reasoning_text[len(streamed_reasoning):]
+                else:
+                    emit_reasoning = ""
+            if emit_reasoning:
                 try:
-                    self.reasoning_callback(reasoning_text)
+                    self.reasoning_callback(emit_reasoning)
                 except Exception:
                     pass
 
@@ -8579,6 +8712,7 @@ class AIAgent:
             "content": _san_content,
             "reasoning": reasoning_text,
             "finish_reason": finish_reason,
+            "timestamp": datetime.now().isoformat(),
         }
 
         raw_reasoning_content = getattr(assistant_message, "reasoning_content", None)
@@ -8952,7 +9086,7 @@ class AIAgent:
         return self.api_mode != "codex_responses"
 
     def _compress_context(self, messages: list, system_message: str, *, approx_tokens: int = None, task_id: str = "default", focus_topic: str = None) -> tuple:
-        """Compress conversation context and split the session in SQLite.
+        """Compress conversation context and persist the rewritten transcript.
 
         Args:
             focus_topic: Optional focus string for guided compression — the
@@ -9020,33 +9154,43 @@ class AIAgent:
 
         if self._session_db:
             try:
-                # Propagate title to the new session with auto-numbering
-                old_title = self._session_db.get_session_title(self.session_id)
-                # Trigger memory extraction on the old session before it rotates.
+                # Trigger memory extraction before compression discards context.
                 self.commit_memory_session(messages)
-                self._session_db.end_session(self.session_id, "compression")
-                old_session_id = self.session_id
-                self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
-                # Update session_log_file to point to the new session's JSON file
-                self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
-                self._session_db.create_session(
-                    session_id=self.session_id,
-                    source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
-                    model=self.model,
-                    parent_session_id=old_session_id,
-                )
-                # Auto-number the title for the continuation session
-                if old_title:
-                    try:
-                        new_title = self._session_db.get_next_title_in_lineage(old_title)
-                        self._session_db.set_session_title(self.session_id, new_title)
-                    except (ValueError, Exception) as e:
-                        logger.debug("Could not propagate title on compression: %s", e)
-                self._session_db.update_system_prompt(self.session_id, new_system_prompt)
-                # Reset flush cursor — new session starts with no messages written
+                if self.split_session_on_compress:
+                    # Propagate title to the new session with auto-numbering.
+                    old_title = self._session_db.get_session_title(self.session_id)
+                    self._session_db.end_session(self.session_id, "compression")
+                    old_session_id = self.session_id
+                    self.session_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+                    # Update session_log_file to point to the new session's JSON file.
+                    self.session_log_file = self.logs_dir / f"session_{self.session_id}.json"
+                    self._session_db.create_session(
+                        session_id=self.session_id,
+                        source=self.platform or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                        model=self.model,
+                        user_id=getattr(self.runtime_context, "user_id", None),
+                        parent_session_id=old_session_id,
+                    )
+                    # Auto-number the title for the continuation session.
+                    if old_title:
+                        try:
+                            new_title = self._session_db.get_next_title_in_lineage(old_title)
+                            self._session_db.set_session_title(self.session_id, new_title)
+                        except (ValueError, Exception) as e:
+                            logger.debug("Could not propagate title on compression: %s", e)
+                    self._session_db.update_system_prompt(self.session_id, new_system_prompt)
+                else:
+                    # Gateway sessions keep a stable session_id across compression.
+                    # Rewrite the active session in place so the stored system prompt
+                    # and transcript stay aligned with the compressed history.
+                    self._session_db.clear_messages(self.session_id)
+                    self._session_db.update_system_prompt(self.session_id, new_system_prompt)
+                    self._force_session_log_overwrite = True
+                # Reset flush cursor so the compressed transcript is rewritten
+                # from the beginning on the next persistence pass.
                 self._last_flushed_db_idx = 0
             except Exception as e:
-                logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
+                logger.warning("Session DB compression persistence failed: %s", e)
 
         # Notify the context engine that the session_id rotated because of
         # compression (not a fresh /new). Plugin engines (e.g. hermes-lcm) use
@@ -9176,6 +9320,74 @@ class AIAgent:
         finally:
             self._executing_tools = False
 
+    def _emit_memory_prefetch_usage(self, query: str, details: list[dict[str, Any]], merged_content: str, *, duration_ms: float = 0.0) -> None:
+        _emit_memory_prefetch_usage_fn(
+            query, details, merged_content,
+            duration_ms=duration_ms,
+            emit_event_fn=_emit_current_observability_event,
+            event_type_cls=_ObservabilityEventType,
+            preview_text_fn=_preview_text,
+        )
+
+    def _emit_auto_injection_context(
+        self,
+        *,
+        base_user_message: str,
+        prefetch_query: str,
+        prefetch_details: list[dict[str, Any]],
+        prefetch_merged: str,
+        plugin_user_context: str,
+    ) -> None:
+        _emit_auto_injection_context_fn(
+            base_user_message=base_user_message,
+            prefetch_query=prefetch_query,
+            prefetch_details=prefetch_details,
+            prefetch_merged=prefetch_merged,
+            plugin_user_context=plugin_user_context,
+            emit_event_fn=_emit_current_observability_event,
+            event_type_cls=_ObservabilityEventType,
+            preview_text_fn=_preview_text,
+        )
+
+    def _emit_memory_tool_usage(
+        self,
+        function_name: str,
+        function_args: dict,
+        function_result: str,
+        *,
+        tool_call_id: Optional[str] = None,
+    ) -> None:
+        _emit_memory_tool_usage_fn(
+            function_name,
+            function_args,
+            function_result,
+            tool_call_id=tool_call_id,
+            memory_manager=self._memory_manager,
+            emit_event_fn=_emit_current_observability_event,
+            event_type_cls=_ObservabilityEventType,
+            preview_text_fn=_preview_text,
+            detect_tool_failure_fn=_detect_tool_failure,
+        )
+
+    def _memory_tool_result_success(self, result: str) -> bool:
+        return _memory_tool_result_success_fn(result)
+
+    def _memory_tool_unavailable(self, result: str) -> bool:
+        return _memory_tool_unavailable_fn(result)
+
+    def _notify_external_memory_write(self, function_args: dict, target: str, result: str) -> None:
+        _notify_external_memory_write_fn(
+            function_args, target, result,
+            memory_manager=self._memory_manager,
+        )
+
+    def _execute_memory_tool(self, function_args: dict) -> str:
+        return _execute_memory_tool_extracted(
+            function_args,
+            memory_store=self._memory_store,
+            memory_manager=self._memory_manager,
+        )
+
     def _dispatch_delegate_task(self, function_args: dict) -> str:
         """Single call site for delegate_task dispatch.
 
@@ -9217,68 +9429,78 @@ class AIAgent:
         if block_message is not None:
             return json.dumps({"error": block_message}, ensure_ascii=False)
 
-        if function_name == "todo":
-            from tools.todo_tool import todo_tool as _todo_tool
-            return _todo_tool(
-                todos=function_args.get("todos"),
-                merge=function_args.get("merge", False),
-                store=self._todo_store,
-            )
-        elif function_name == "session_search":
-            if not self._session_db:
-                return json.dumps({"success": False, "error": "Session database not available."})
-            from tools.session_search_tool import session_search as _session_search
-            return _session_search(
-                query=function_args.get("query", ""),
-                role_filter=function_args.get("role_filter"),
-                limit=function_args.get("limit", 3),
-                db=self._session_db,
-                current_session_id=self.session_id,
-            )
-        elif function_name == "memory":
-            target = function_args.get("target", "memory")
-            from tools.memory_tool import memory_tool as _memory_tool
-            result = _memory_tool(
-                action=function_args.get("action"),
-                target=target,
-                content=function_args.get("content"),
-                old_text=function_args.get("old_text"),
-                store=self._memory_store,
-            )
-            # Bridge: notify external memory provider of built-in memory writes
-            if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                try:
-                    self._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
-                        target,
-                        function_args.get("content", ""),
-                        metadata=self._build_memory_write_metadata(
-                            task_id=effective_task_id,
-                            tool_call_id=tool_call_id,
-                        ),
+        _tool_trace_ctx = _get_current_observability_trace_ctx()
+        with _tool_observability_ctx(
+            function_name,
+            function_args,
+            tool_call_id=tool_call_id,
+            trace_ctx=_tool_trace_ctx,
+            emit_event_fn=_emit_observability_event,
+            event_type_cls=_ObservabilityEventType,
+            severity_cls=_ObservabilitySeverity,
+        ) as _tool_event_ctx:
+            if function_name == "todo":
+                from tools.todo_tool import todo_tool as _todo_tool
+                _tool_result = _todo_tool(
+                    todos=function_args.get("todos"),
+                    merge=function_args.get("merge", False),
+                    store=self._todo_store,
+                )
+            elif function_name == "session_search":
+                if not self._session_db:
+                    _tool_result = json.dumps({"success": False, "error": "Session database not available."})
+                else:
+                    from tools.session_search_tool import session_search as _session_search
+                    _tool_result = _session_search(
+                        query=function_args.get("query", ""),
+                        role_filter=function_args.get("role_filter"),
+                        limit=function_args.get("limit", 3),
+                        db=self._session_db,
+                        current_session_id=self.session_id,
                     )
-                except Exception:
-                    pass
-            return result
-        elif self._memory_manager and self._memory_manager.has_tool(function_name):
-            return self._memory_manager.handle_tool_call(function_name, function_args)
-        elif function_name == "clarify":
-            from tools.clarify_tool import clarify_tool as _clarify_tool
-            return _clarify_tool(
-                question=function_args.get("question", ""),
-                choices=function_args.get("choices"),
-                callback=self.clarify_callback,
-            )
-        elif function_name == "delegate_task":
-            return self._dispatch_delegate_task(function_args)
-        else:
-            return handle_function_call(
-                function_name, function_args, effective_task_id,
-                tool_call_id=tool_call_id,
-                session_id=self.session_id or "",
-                enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
-                skip_pre_tool_call_hook=True,
-            )
+            elif function_name == "memory":
+                _tool_result = self._execute_memory_tool(function_args)
+            elif self._memory_manager and self._memory_manager.has_tool(function_name):
+                _tool_result = self._memory_manager.handle_tool_call(function_name, function_args)
+            elif function_name == "clarify":
+                from tools.clarify_tool import clarify_tool as _clarify_tool
+                _tool_result = _clarify_tool(
+                    question=function_args.get("question", ""),
+                    choices=function_args.get("choices"),
+                    callback=self.clarify_callback,
+                )
+            elif function_name == "delegate_task":
+                _tool_result = self._dispatch_delegate_task(function_args)
+            else:
+                _handle_kwargs = {
+                    "tool_call_id": tool_call_id,
+                    "session_id": self.session_id or "",
+                    "enabled_tools": list(self.valid_tool_names) if self.valid_tool_names else None,
+                    "skip_pre_tool_call_hook": True,
+                }
+                with _suppress_tool_event_instrumentation():
+                    _tool_result = handle_function_call(
+                        function_name,
+                        function_args,
+                        effective_task_id,
+                        **_handle_kwargs,
+                    )
+
+        self._emit_memory_tool_usage(
+            function_name,
+            function_args,
+            _tool_result,
+            tool_call_id=tool_call_id,
+        )
+
+        _emit_tool_success_event(
+            _tool_event_ctx,
+            _tool_result,
+            emit_event_fn=_emit_observability_event,
+            event_type_cls=_ObservabilityEventType,
+            emit_semantic_events=False,
+        )
+        return _tool_result
 
     @staticmethod
     def _wrap_verbose(label: str, text: str, indent: str = "     ") -> str:
@@ -9663,6 +9885,7 @@ class AIAgent:
                 "role": "tool",
                 "content": function_result,
                 "tool_call_id": tc.id,
+                "timestamp": datetime.now().isoformat(),
             }
             messages.append(tool_msg)
 
@@ -9803,6 +10026,18 @@ class AIAgent:
                 except Exception:
                     pass  # never block tool execution
 
+            _tool_event_ctx = None
+            if _block_msg is None:
+                _tool_trace_ctx = _get_current_observability_trace_ctx()
+                _tool_event_ctx = _begin_tool_event(
+                    function_name,
+                    function_args,
+                    tool_call_id=tool_call.id,
+                    trace_ctx=_tool_trace_ctx,
+                    emit_event_fn=_emit_observability_event,
+                    event_type_cls=_ObservabilityEventType,
+                )
+
             tool_start_time = time.time()
 
             if _block_msg is not None:
@@ -9840,29 +10075,7 @@ class AIAgent:
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
             elif function_name == "memory":
-                target = function_args.get("target", "memory")
-                from tools.memory_tool import memory_tool as _memory_tool
-                function_result = _memory_tool(
-                    action=function_args.get("action"),
-                    target=target,
-                    content=function_args.get("content"),
-                    old_text=function_args.get("old_text"),
-                    store=self._memory_store,
-                )
-                # Bridge: notify external memory provider of built-in memory writes
-                if self._memory_manager and function_args.get("action") in ("add", "replace"):
-                    try:
-                        self._memory_manager.on_memory_write(
-                            function_args.get("action", ""),
-                            target,
-                            function_args.get("content", ""),
-                            metadata=self._build_memory_write_metadata(
-                                task_id=effective_task_id,
-                                tool_call_id=getattr(tool_call, "id", None),
-                            ),
-                        )
-                    except Exception:
-                        pass
+                function_result = self._execute_memory_tool(function_args)
                 tool_duration = time.time() - tool_start_time
                 if self._should_emit_quiet_tool_messages():
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
@@ -9917,6 +10130,15 @@ class AIAgent:
                 except Exception as tool_error:
                     function_result = json.dumps({"error": f"Context engine tool '{function_name}' failed: {tool_error}"})
                     logger.error("context_engine.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                    if _tool_event_ctx is not None:
+                        _emit_tool_failure_event(
+                            _tool_event_ctx,
+                            tool_error,
+                            emit_event_fn=_emit_observability_event,
+                            event_type_cls=_ObservabilityEventType,
+                            severity_cls=_ObservabilitySeverity,
+                        )
+                        _tool_event_ctx = None
                 finally:
                     tool_duration = time.time() - tool_start_time
                     cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_ce_result)
@@ -9941,6 +10163,15 @@ class AIAgent:
                 except Exception as tool_error:
                     function_result = json.dumps({"error": f"Memory tool '{function_name}' failed: {tool_error}"})
                     logger.error("memory_manager.handle_tool_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                    if _tool_event_ctx is not None:
+                        _emit_tool_failure_event(
+                            _tool_event_ctx,
+                            tool_error,
+                            emit_event_fn=_emit_observability_event,
+                            event_type_cls=_ObservabilityEventType,
+                            severity_cls=_ObservabilitySeverity,
+                        )
+                        _tool_event_ctx = None
                 finally:
                     tool_duration = time.time() - tool_start_time
                     cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_mem_result)
@@ -9969,6 +10200,15 @@ class AIAgent:
                 except Exception as tool_error:
                     function_result = f"Error executing tool '{function_name}': {tool_error}"
                     logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                    if _tool_event_ctx is not None:
+                        _emit_tool_failure_event(
+                            _tool_event_ctx,
+                            tool_error,
+                            emit_event_fn=_emit_observability_event,
+                            event_type_cls=_ObservabilityEventType,
+                            severity_cls=_ObservabilitySeverity,
+                        )
+                        _tool_event_ctx = None
                 finally:
                     tool_duration = time.time() - tool_start_time
                     cute_msg = _get_cute_tool_message_impl(function_name, function_args, tool_duration, result=_spinner_result)
@@ -9988,7 +10228,32 @@ class AIAgent:
                 except Exception as tool_error:
                     function_result = f"Error executing tool '{function_name}': {tool_error}"
                     logger.error("handle_function_call raised for %s: %s", function_name, tool_error, exc_info=True)
+                    if _tool_event_ctx is not None:
+                        _emit_tool_failure_event(
+                            _tool_event_ctx,
+                            tool_error,
+                            emit_event_fn=_emit_observability_event,
+                            event_type_cls=_ObservabilityEventType,
+                            severity_cls=_ObservabilitySeverity,
+                        )
+                        _tool_event_ctx = None
                 tool_duration = time.time() - tool_start_time
+
+            self._emit_memory_tool_usage(
+                function_name,
+                function_args,
+                function_result,
+                tool_call_id=tool_call.id,
+            )
+
+            if _tool_event_ctx is not None:
+                _emit_tool_success_event(
+                    _tool_event_ctx,
+                    function_result,
+                    emit_event_fn=_emit_observability_event,
+                    event_type_cls=_ObservabilityEventType,
+                    emit_semantic_events=False,
+                )
 
             result_preview = function_result if self.verbose_logging else (
                 function_result[:200] if len(function_result) > 200 else function_result
@@ -10049,7 +10314,8 @@ class AIAgent:
             tool_msg = {
                 "role": "tool",
                 "content": function_result,
-                "tool_call_id": tool_call.id
+                "tool_call_id": tool_call.id,
+                "timestamp": datetime.now().isoformat(),
             }
             messages.append(tool_msg)
 
@@ -10232,7 +10498,7 @@ class AIAgent:
                 if "<think>" in final_response:
                     final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
                 if final_response:
-                    messages.append({"role": "assistant", "content": final_response})
+                    messages.append({"role": "assistant", "content": final_response, "timestamp": datetime.now().isoformat()})
                 else:
                     final_response = "I reached the iteration limit and couldn't generate a summary."
             else:
@@ -10275,7 +10541,7 @@ class AIAgent:
                     if "<think>" in final_response:
                         final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
                     if final_response:
-                        messages.append({"role": "assistant", "content": final_response})
+                        messages.append({"role": "assistant", "content": final_response, "timestamp": datetime.now().isoformat()})
                     else:
                         final_response = "I reached the iteration limit and couldn't generate a summary."
                 else:
@@ -10295,6 +10561,9 @@ class AIAgent:
         task_id: str = None,
         stream_callback: Optional[callable] = None,
         persist_user_message: Optional[str] = None,
+        turn_system_context: Optional[str] = None,
+        turn_user_context: Optional[str] = None,
+        control_user_context: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run a complete conversation with tool calling until completion.
@@ -10310,6 +10579,17 @@ class AIAgent:
             persist_user_message: Optional clean user message to store in
                 transcripts/history when user_message contains API-only
                 synthetic prefixes.
+            turn_system_context: Optional API-only system-layer instruction
+                block appended to the effective system prompt without mutating
+                persisted history or the cached session system prompt.
+            turn_user_context: Optional API-only gateway/session context
+                appended to the current turn's user message without mutating
+                persisted history. Use for dynamic per-turn metadata that
+                should not enter the system-prompt cache prefix.
+            control_user_context: Optional API-only control/context block
+                injected into the current turn's user message without mutating
+                persisted history. Use for gateway/runtime state like
+                interrupted-turn continuation hints.
                     or queuing follow-up prefetch work.
 
         Returns:
@@ -10336,6 +10616,12 @@ class AIAgent:
             user_message = _sanitize_surrogates(user_message)
         if isinstance(persist_user_message, str):
             persist_user_message = _sanitize_surrogates(persist_user_message)
+        if isinstance(turn_system_context, str):
+            turn_system_context = _sanitize_surrogates(turn_system_context)
+        if isinstance(turn_user_context, str):
+            turn_user_context = _sanitize_surrogates(turn_user_context)
+        if isinstance(control_user_context, str):
+            control_user_context = _sanitize_surrogates(control_user_context)
 
         # Store stream callback for _interruptible_api_call to pick up
         self._stream_callback = stream_callback
@@ -10440,7 +10726,7 @@ class AIAgent:
                 self._turns_since_memory = 0
 
         # Add user message
-        user_msg = {"role": "user", "content": user_message}
+        user_msg = {"role": "user", "content": user_message, "timestamp": datetime.now().isoformat()}
         messages.append(user_msg)
         current_turn_user_idx = len(messages) - 1
         self._persist_user_message_idx = current_turn_user_idx
@@ -10500,6 +10786,7 @@ class AIAgent:
                         logger.debug("Session DB update_system_prompt failed: %s", e)
 
         active_system_prompt = self._cached_system_prompt
+        _compressed_this_turn = False
 
         # ── Preflight context compression ──
         # Before entering the main loop, check if the loaded conversation
@@ -10542,12 +10829,20 @@ class AIAgent:
                         messages, system_message, approx_tokens=_preflight_tokens,
                         task_id=effective_task_id,
                     )
+                    _compressed_this_turn = True
                     if len(messages) >= _orig_len:
                         break  # Cannot compress further
-                    # Compression created a new session — clear the history
-                    # reference so _flush_messages_to_session_db writes ALL
-                    # compressed messages to the new session's SQLite, not
-                    # skipping them because conversation_history is still the
+                    min_compressible_len = (
+                        self.context_compressor.protect_first_n
+                        + self.context_compressor.protect_last_n
+                        + 1
+                    )
+                    if len(messages) <= min_compressible_len:
+                        break  # Only protected messages remain
+                    # Compression rewrote the persisted transcript. Clear the
+                    # history reference so _flush_messages_to_session_db writes
+                    # ALL compressed messages from index 0 instead of skipping
+                    # them because conversation_history is still the
                     # pre-compression length.
                     conversation_history = None
                     # Fix: reset retry counters after compression so the model
@@ -10592,7 +10887,7 @@ class AIAgent:
                 is_first_turn=(not bool(conversation_history)),
                 model=self.model,
                 platform=getattr(self, "platform", None) or "",
-                sender_id=getattr(self, "_user_id", None) or "",
+                sender_id=self.runtime_context.user_id or "",
             )
             _ctx_parts: list[str] = []
             for r in _pre_results:
@@ -10648,12 +10943,34 @@ class AIAgent:
         # Use original_user_message (clean input) — user_message may contain
         # injected skill content that bloats / breaks provider queries.
         _ext_prefetch_cache = ""
+        _ext_prefetch_details = []
         if self._memory_manager:
             try:
                 _query = original_user_message if isinstance(original_user_message, str) else ""
-                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query) or ""
+                _emit_current_observability_event(
+                    _ObservabilityEventType.AGENT_MEMORY_CALLED,
+                    {"source": "prefetch", "query_preview": _preview_text(_query, 200), "stage": "context"},
+                )
+                _prefetch_started_at = time.time()
+                _ext_prefetch_cache = self._memory_manager.prefetch_all(_query)
+                _ext_prefetch_details = list(
+                    getattr(self._memory_manager, "_last_prefetch_details", []) or []
+                )
+                _prefetch_duration_ms = (time.time() - _prefetch_started_at) * 1000
+                if _ext_prefetch_cache:
+                    self._emit_memory_prefetch_usage(_query, _ext_prefetch_details, _ext_prefetch_cache, duration_ms=_prefetch_duration_ms)
             except Exception:
                 pass
+        try:
+            self._emit_auto_injection_context(
+                base_user_message=user_message if isinstance(user_message, str) else str(user_message or ""),
+                prefetch_query=original_user_message if isinstance(original_user_message, str) else "",
+                prefetch_details=_ext_prefetch_details,
+                prefetch_merged=_ext_prefetch_cache,
+                plugin_user_context=_plugin_user_context,
+            )
+        except Exception:
+            pass
 
         while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) or self._budget_grace_call:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
@@ -10799,8 +11116,12 @@ class AIAgent:
                         _fenced = build_memory_context_block(_ext_prefetch_cache)
                         if _fenced:
                             _injections.append(_fenced)
+                    if turn_user_context:
+                        _injections.append(turn_user_context)
                     if _plugin_user_context:
                         _injections.append(_plugin_user_context)
+                    if control_user_context:
+                        _injections.append(control_user_context)
                     if _injections:
                         _base = api_msg.get("content", "")
                         if isinstance(_base, str):
@@ -10829,13 +11150,15 @@ class AIAgent:
                 # The signature field helps maintain reasoning continuity
                 api_messages.append(api_msg)
 
-            # Build the final system message: cached prompt + ephemeral system prompt.
+            # Build the final system message: cached prompt + API-only system injections.
             # Ephemeral additions are API-call-time only (not persisted to session DB).
             # External recall context is injected into the user message, not the system
             # prompt, so the stable cache prefix remains unchanged.
             effective_system = active_system_prompt or ""
             if self.ephemeral_system_prompt:
                 effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+            if turn_system_context:
+                effective_system = (effective_system + "\n\n" + turn_system_context).strip()
             # NOTE: Plugin context from pre_llm_call hooks is injected into the
             # user message (see injection block above), NOT the system prompt.
             # This is intentional — system prompt modifications break the prompt
@@ -11594,10 +11917,11 @@ class AIAgent:
                         if canonical_usage.cache_read_tokens and prompt_tokens:
                             _cache_pct = f" cache={canonical_usage.cache_read_tokens}/{prompt_tokens} ({100*canonical_usage.cache_read_tokens/prompt_tokens:.0f}%)"
                         logger.info(
-                            "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s",
+                            "API call #%d: model=%s provider=%s in=%d out=%d total=%d latency=%.1fs%s raw_usage=%s",
                             self.session_api_calls, self.model, self.provider or "unknown",
                             prompt_tokens, completion_tokens, total_tokens,
                             api_duration, _cache_pct,
+                            _bridge_format_usage_payload_for_log(response.usage) or "{}",
                         )
 
                         cost_result = estimate_usage_cost(
@@ -12173,9 +12497,9 @@ class AIAgent:
                                 approx_tokens=approx_tokens,
                                 task_id=effective_task_id,
                             )
-                            # Compression created a new session — clear history
-                            # so _flush_messages_to_session_db writes compressed
-                            # messages to the new session, not skipping them.
+                            # Compression rewrote persisted history — clear the
+                            # stale history reference so compressed messages are
+                            # flushed from index 0 on persistence.
                             conversation_history = None
                             if len(messages) < original_len or old_ctx > _reduced_ctx:
                                 self._emit_status(
@@ -12303,9 +12627,9 @@ class AIAgent:
                             messages, system_message, approx_tokens=approx_tokens,
                             task_id=effective_task_id,
                         )
-                        # Compression created a new session — clear history
-                        # so _flush_messages_to_session_db writes compressed
-                        # messages to the new session, not skipping them.
+                        # Compression rewrote persisted history — clear the
+                        # stale history reference so compressed messages are
+                        # flushed from index 0 on persistence.
                         conversation_history = None
 
                         if len(messages) < original_len:
@@ -12460,9 +12784,9 @@ class AIAgent:
                             messages, system_message, approx_tokens=approx_tokens,
                             task_id=effective_task_id,
                         )
-                        # Compression created a new session — clear history
-                        # so _flush_messages_to_session_db writes compressed
-                        # messages to the new session, not skipping them.
+                        # Compression rewrote persisted history — clear the
+                        # stale history reference so compressed messages are
+                        # flushed from index 0 on persistence.
                         conversation_history = None
 
                         if len(messages) < original_len or new_ctx and new_ctx < old_ctx:
@@ -12928,6 +13252,15 @@ class AIAgent:
                     }
                 elif hasattr(self, "_codex_incomplete_retries"):
                     self._codex_incomplete_retries = 0
+
+                raw_tool_calls = getattr(assistant_message, "tool_calls", None)
+                if raw_tool_calls is None:
+                    assistant_message.tool_calls = []
+                elif not isinstance(raw_tool_calls, list):
+                    try:
+                        assistant_message.tool_calls = list(raw_tool_calls)
+                    except TypeError:
+                        assistant_message.tool_calls = []
                 
                 # Check for tool calls
                 if assistant_message.tool_calls:
@@ -13216,16 +13549,21 @@ class AIAgent:
                     else:
                         _real_tokens = estimate_messages_tokens_rough(messages)
 
-                    if self.compression_enabled and _compressor.should_compress(_real_tokens):
+                    if (
+                        self.compression_enabled
+                        and not _compressed_this_turn
+                        and _compressor.should_compress(_real_tokens)
+                    ):
                         self._safe_print("  ⟳ compacting context…")
                         messages, active_system_prompt = self._compress_context(
                             messages, system_message,
                             approx_tokens=self.context_compressor.last_prompt_tokens,
                             task_id=effective_task_id,
                         )
-                        # Compression created a new session — clear history so
-                        # _flush_messages_to_session_db writes compressed messages
-                        # to the new session (see preflight compression comment).
+                        _compressed_this_turn = True
+                        # Compression rewrote persisted history — clear the
+                        # stale history reference so compressed messages flush
+                        # from index 0 (see preflight compression comment).
                         conversation_history = None
                     
                     # Save session log incrementally (so progress is visible even if interrupted)
@@ -13585,7 +13923,7 @@ class AIAgent:
                     final_response = f"I apologize, but I encountered repeated errors: {error_msg}"
                     # Append as assistant so the history stays valid for
                     # session resume (avoids consecutive user messages).
-                    messages.append({"role": "assistant", "content": final_response})
+                    messages.append({"role": "assistant", "content": final_response, "timestamp": datetime.now().isoformat()})
                     break
         
         if final_response is None and (
@@ -13609,16 +13947,29 @@ class AIAgent:
         
         # Determine if conversation completed successfully
         completed = final_response is not None and api_call_count < self.max_iterations
+        _post_response_tail_started = time.perf_counter() if final_response is not None else None
+        _post_response_tail_timings: Dict[str, float] = {}
+
+        def _record_post_response_tail(segment: str, started_at: float) -> None:
+            if _post_response_tail_started is None:
+                return
+            _post_response_tail_timings[segment] = time.perf_counter() - started_at
 
         # Save trajectory if enabled.  ``user_message`` may be a multimodal
         # list of parts; the trajectory format wants a plain string.
+        _segment_started = time.perf_counter()
         self._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
+        _record_post_response_tail("save_trajectory", _segment_started)
 
         # Clean up VM and browser for this task after conversation completes
+        _segment_started = time.perf_counter()
         self._cleanup_task_resources(effective_task_id)
+        _record_post_response_tail("cleanup_task_resources", _segment_started)
 
         # Persist session to both JSON log and SQLite
+        _segment_started = time.perf_counter()
         self._persist_session(messages, conversation_history)
+        _record_post_response_tail("persist_session", _segment_started)
 
         # ── Turn-exit diagnostic log ─────────────────────────────────────
         # Always logged at INFO so agent.log captures WHY every turn ended.
@@ -13669,6 +14020,7 @@ class AIAgent:
         # Plugins can use this to persist conversation data (e.g. sync
         # to an external memory system).
         if final_response and not interrupted:
+            _segment_started = time.perf_counter()
             try:
                 from hermes_cli.plugins import invoke_hook as _invoke_hook
                 _invoke_hook(
@@ -13682,6 +14034,7 @@ class AIAgent:
                 )
             except Exception as exc:
                 logger.warning("post_llm_call hook failed: %s", exc)
+            _record_post_response_tail("post_llm_call_hook", _segment_started)
 
         # Extract reasoning from the last assistant message (if any)
         last_reasoning = None
@@ -13716,6 +14069,8 @@ class AIAgent:
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
+            "session_id": self.session_id,
+            "history_rewritten": bool(_compressed_this_turn),
         }
         if self._tool_guardrail_halt_decision is not None:
             result["guardrail"] = self._tool_guardrail_halt_decision.to_metadata()
@@ -13726,13 +14081,34 @@ class AIAgent:
         if _leftover_steer:
             result["pending_steer"] = _leftover_steer
         self._response_was_previewed = False
-        
+
+        _emit_agent_level_final = getattr(self, "platform", None) in (None, "cli", "local")
+        _segment_started = time.perf_counter()
+        _emit_final_response_event(
+            final_response=final_response,
+            interrupted=interrupted,
+            completed=completed,
+            api_call_count=api_call_count,
+            input_tokens=self.session_input_tokens,
+            output_tokens=self.session_output_tokens,
+            model=self.model,
+            emit_enabled=_emit_agent_level_final,
+            obs_available=_OBSERVABILITY_ENABLED,
+            current_trace=_current_observability_trace,
+            fallback_getter=_default_trace_ctx,
+            emit_event_fn=_emit_observability_event,
+            event_type_cls=_ObservabilityEventType,
+        )
+        _record_post_response_tail("emit_final_response_event", _segment_started)
+
         # Include interrupt message if one triggered the interrupt
         if interrupted and self._interrupt_message:
             result["interrupt_message"] = self._interrupt_message
-        
+
         # Clear interrupt state after handling
+        _segment_started = time.perf_counter()
         self.clear_interrupt()
+        _record_post_response_tail("clear_interrupt", _segment_started)
 
         # Clear stream callback so it doesn't leak into future calls
         self._stream_callback = None
@@ -13755,6 +14131,7 @@ class AIAgent:
         # Background memory/skill review — runs AFTER the response is delivered
         # so it never competes with the user's task for model attention.
         if final_response and not interrupted and (_should_review_memory or _should_review_skills):
+            _segment_started = time.perf_counter()
             try:
                 self._spawn_background_review(
                     messages_snapshot=list(messages),
@@ -13763,6 +14140,7 @@ class AIAgent:
                 )
             except Exception:
                 pass  # Background review is best-effort
+            _record_post_response_tail("spawn_background_review", _segment_started)
 
         # Note: Memory provider on_session_end() + shutdown_all() are NOT
         # called here — run_conversation() is called once per user message in
@@ -13774,6 +14152,7 @@ class AIAgent:
         # Plugin hook: on_session_end
         # Fired at the very end of every run_conversation call.
         # Plugins can use this for cleanup, flushing buffers, etc.
+        _segment_started = time.perf_counter()
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _invoke_hook(
@@ -13786,6 +14165,21 @@ class AIAgent:
             )
         except Exception as exc:
             logger.warning("on_session_end hook failed: %s", exc)
+        _record_post_response_tail("on_session_end_hook", _segment_started)
+
+        if _post_response_tail_started is not None:
+            _post_response_tail_timings["total"] = (
+                time.perf_counter() - _post_response_tail_started
+            )
+            logger.info(
+                "Post-response tail timings: session=%s model=%s %s",
+                self.session_id or "none",
+                self.model,
+                " ".join(
+                    f"{name}={duration:.3f}s"
+                    for name, duration in _post_response_tail_timings.items()
+                ),
+            )
 
         return result
 

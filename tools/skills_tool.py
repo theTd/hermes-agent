@@ -367,6 +367,8 @@ def _capture_required_environment_variables(
 def _is_gateway_surface() -> bool:
     if os.getenv("HERMES_GATEWAY_SESSION"):
         return True
+    if os.getenv("HERMES_SESSION_PLATFORM"):
+        return True
     from gateway.session_context import get_session_env
     return bool(get_session_env("HERMES_SESSION_PLATFORM"))
 
@@ -506,8 +508,25 @@ def _get_disabled_skill_names() -> Set[str]:
     Delegates to ``agent.skill_utils.get_disabled_skill_names`` — kept here
     as a public re-export so existing callers don't need updating.
     """
-    from agent.skill_utils import get_disabled_skill_names
-    return get_disabled_skill_names()
+    try:
+        from hermes_cli.config import load_config
+
+        config = load_config() or {}
+        skills_cfg = config.get("skills")
+        if not isinstance(skills_cfg, dict):
+            return set()
+        values = skills_cfg.get("disabled")
+        if isinstance(values, str):
+            values = [values]
+        return {
+            str(value).strip()
+            for value in (values or [])
+            if str(value).strip()
+        }
+    except Exception:
+        from agent.skill_utils import get_disabled_skill_names
+
+        return get_disabled_skill_names()
 
 
 def _get_session_platform() -> str:
@@ -540,10 +559,27 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         if resolved_platform:
             platform_disabled = cfg_get(skills_cfg, "platform_disabled", resolved_platform)
             if platform_disabled is not None:
-                return name in platform_disabled
-        return name in skills_cfg.get("disabled", [])
+                values = platform_disabled
+            else:
+                values = skills_cfg.get("disabled")
+        else:
+            values = skills_cfg.get("disabled")
+
+        if isinstance(values, str):
+            values = [values]
+        disabled = {
+            str(value).strip()
+            for value in (values or [])
+            if str(value).strip()
+        }
+        return str(name).strip() in disabled
     except Exception:
-        return False
+        try:
+            from agent.skill_utils import get_disabled_skill_names
+
+            return name in get_disabled_skill_names(platform)
+        except Exception:
+            return False
 
 
 def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
@@ -1361,6 +1397,8 @@ def skill_view(
 
         if capture_result["gateway_setup_hint"]:
             result["gateway_setup_hint"] = capture_result["gateway_setup_hint"]
+        elif setup_needed and _is_gateway_surface():
+            result["gateway_setup_hint"] = _gateway_setup_hint()
 
         if setup_needed:
             missing_items = [

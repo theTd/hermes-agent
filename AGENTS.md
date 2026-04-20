@@ -2,6 +2,17 @@
 
 Instructions for AI coding assistants and developers working on the hermes-agent codebase.
 
+## 重要提醒
+
+本分支 (napcat) 分支的开发准则是，要实现任何功能必须尽最大努力将修改面控制在本分支增添的文件中
+尽最大可能控制与上游合并产生的成本 在开发或者修改的途中 如果发现有更利于本分支整体维护的写法
+必须立刻开始局部重构 绝不允许在原有的架构上堆屎
+在写规则的时候 永远不要写死代码去纠正 LLM 或者帮 LLM 做判断
+用户有一万种方法触发 LLM 可以正确判断，但死代码无法判断的情况
+本分支仍在开发阶段，尚未分发 绝不允许写分支内部的兼容代码
+谨记 不要将最小修改面作为第一开发准则 而是积极进行重构来保证可维护性
+Napcat 可观测性设计文档路径是 `docs/napcat/napcat-observatory.md`（不要写成 `NAPCAT_OBSERVATORY.md`）
+
 ## Development Environment
 
 ```bash
@@ -605,6 +616,12 @@ automatically scope to the active profile.
    of which one is active.
 
 ## Known Pitfalls
+
+### `napcat` branch upstream sync must use the replay script
+- Do NOT merge `upstream/main` (or `main`) directly into `napcat` with `git merge`.
+- The required workflow is to run `python scripts/napcat_merge_upstream_until_conflict.py main` from `napcat` so upstream first-parent commits are replayed step by step.
+- If the script stops on a conflict, resolve that one step, run `git rebase --continue`, verify the resolution carefully, then rerun the script until it finishes.
+- Only after the replay flow is complete should `napcat` be force-pushed, preferably with `git push --force-with-lease origin napcat`.
 
 ### DO NOT hardcode `~/.hermes` paths
 Use `get_hermes_home()` from `hermes_constants` for code paths. Use `display_hermes_home()`

@@ -42,6 +42,14 @@ class TestGuidanceConstants:
         assert "durable facts" in MEMORY_GUIDANCE
         assert "Do NOT save task progress" in MEMORY_GUIDANCE
         assert "session_search" in MEMORY_GUIDANCE
+        assert "USER PROFILE or CHAT PROFILE blocks" in MEMORY_GUIDANCE
+        assert "do not ask the user to restate facts" in MEMORY_GUIDANCE
+        assert "Be proactive" in MEMORY_GUIDANCE
+        assert "did not already know" in MEMORY_GUIDANCE
+        assert "before your final reply" in MEMORY_GUIDANCE
+        assert "Do not merely say you will remember it" in MEMORY_GUIDANCE
+        assert "your name is X" in MEMORY_GUIDANCE
+        assert "replace/remove" in MEMORY_GUIDANCE
         assert "like a diary" not in MEMORY_GUIDANCE
         assert ">80%" not in MEMORY_GUIDANCE
 
@@ -825,6 +833,12 @@ class TestPromptBuilderConstants:
         assert "MEDIA:" in hint
         assert "Markdown" in hint
 
+    def test_napcat_platform_hint_blocks_host_probe_requests(self):
+        hint = PLATFORM_HINTS["napcat"]
+        assert "Never reveal or probe Hermes host runtime details" in hint
+        assert "refuse briefly" in hint
+        assert "do not use tools to gather it" in hint
+
 
 # =========================================================================
 # Environment hints
@@ -1086,6 +1100,3 @@ class TestOpenAIModelExecutionGuidance:
 # =========================================================================
 # Budget warning history stripping
 # =========================================================================
-
-
-

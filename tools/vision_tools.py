@@ -73,6 +73,15 @@ _VISION_DOWNLOAD_TIMEOUT = _resolve_download_timeout()
 _VISION_MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024
 
 
+def _is_aux_stream_state_error(exc: Exception) -> bool:
+    """Return True for transient SDK stream-state bugs worth retrying once."""
+    msg = str(exc or "")
+    lowered = msg.lower()
+    if "'nonetype' object has no attribute 'append'" in lowered:
+        return True
+    return "current_snapshot" in lowered and "append" in lowered
+
+
 def _validate_image_url(url: str) -> bool:
     """
     Basic validation of image URL format.
@@ -591,6 +600,12 @@ async def vision_analyze_tool(
                 image_data_url = _resize_image_for_vision(
                     temp_image_path, mime_type=detected_mime_type)
                 messages[0]["content"][1]["image_url"]["url"] = image_data_url
+                response = await async_call_llm(**call_kwargs)
+            elif _is_aux_stream_state_error(_api_err):
+                logger.warning(
+                    "Vision auxiliary call hit transient stream-state bug; retrying once: %s",
+                    _api_err,
+                )
                 response = await async_call_llm(**call_kwargs)
             else:
                 raise

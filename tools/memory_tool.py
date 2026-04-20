@@ -2,11 +2,13 @@
 """
 Memory Tool Module - Persistent Curated Memory
 
-Provides bounded, file-backed memory that persists across sessions. Two stores:
+Provides bounded, file-backed memory that persists across sessions. Three stores:
   - MEMORY.md: agent's personal notes and observations (environment facts, project
     conventions, tool quirks, things learned)
   - USER.md: what the agent knows about the user (preferences, communication style,
     expectations, workflow habits)
+  - chats/<platform>/<chat_type>/<chat>.md: shared facts about the current
+    group/channel/thread when a non-DM chat scope exists
 
 Both are injected into the system prompt as a frozen snapshot at session start.
 Mid-session writes update files on disk immediately (durable) but do NOT change
@@ -104,6 +106,47 @@ def _scan_memory_content(content: str) -> Optional[str]:
     return None
 
 
+def validate_atomic_memory_entry(content: str) -> Optional[str]:
+    """Validate that a memory entry contains exactly one durable fact."""
+    text = str(content or "").strip()
+    if not text:
+        return None
+
+    if "\n§\n" in text or ENTRY_DELIMITER.strip() in text:
+        return (
+            "Memory entry must contain exactly one atomic fact. "
+            "Do not include bundled notes or the entry delimiter."
+        )
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 1:
+        return (
+            "Memory entry must be a single atomic fact on one line. "
+            "Split multi-line notes into separate entries."
+        )
+
+    if re.search(r"(^|\s)[\-*•]\s+", text) or re.search(r"(^|\s)\d+[.)]\s+", text):
+        return (
+            "Memory entry must be atomic. "
+            "Do not store bullet lists or numbered lists in one entry."
+        )
+
+    if ";" in text or "；" in text:
+        return (
+            "Memory entry must contain exactly one atomic fact. "
+            "Split semicolon-separated facts into separate entries."
+        )
+
+    sentence_boundaries = re.findall(r"(?<=[A-Za-z0-9一-鿿])[。！？.!?]+(?=\s|$)", text)
+    if len(sentence_boundaries) > 1:
+        return (
+            "Memory entry must contain exactly one atomic fact. "
+            "Split multiple sentences into separate entries."
+        )
+
+    return None
+
+
 class MemoryStore:
     """
     Bounded curated memory with file persistence. One instance per AIAgent.
@@ -115,30 +158,57 @@ class MemoryStore:
         Tool responses always reflect this live state.
     """
 
-    def __init__(self, memory_char_limit: int = 2200, user_char_limit: int = 1375):
+    def __init__(
+        self,
+        memory_char_limit: int = 2200,
+        user_char_limit: int = 1375,
+        chat_char_limit: int = 2200,
+        *,
+        platform: Optional[str] = None,
+        user_id: Optional[str] = None,
+        user_name: Optional[str] = None,
+        chat_id: Optional[str] = None,
+        chat_type: Optional[str] = None,
+        thread_id: Optional[str] = None,
+    ):
         self.memory_entries: List[str] = []
         self.user_entries: List[str] = []
+        self.chat_entries: List[str] = []
         self.memory_char_limit = memory_char_limit
         self.user_char_limit = user_char_limit
+        self.chat_char_limit = chat_char_limit
+        self.platform = self._normalize_scope_component(platform)
+        self.user_id = self._normalize_scope_component(user_id)
+        self.user_name = str(user_name or "").strip()
+        self.chat_id = self._normalize_scope_component(chat_id)
+        self.chat_type = str(chat_type or "").strip().lower()
+        self.thread_id = self._normalize_scope_component(thread_id)
         # Frozen snapshot for system prompt -- set once at load_from_disk()
-        self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
+        self._system_prompt_snapshot: Dict[str, str] = {
+            "memory": "",
+            "user": "",
+            "chat": "",
+        }
 
     def load_from_disk(self):
-        """Load entries from MEMORY.md and USER.md, capture system prompt snapshot."""
+        """Load entries from MEMORY.md and USER profile storage, capture system prompt snapshot."""
         mem_dir = get_memory_dir()
         mem_dir.mkdir(parents=True, exist_ok=True)
 
         self.memory_entries = self._read_file(mem_dir / "MEMORY.md")
-        self.user_entries = self._read_file(mem_dir / "USER.md")
+        self.user_entries = self._read_user_entries_for_prompt()
+        self.chat_entries = self._read_chat_entries_for_prompt()
 
         # Deduplicate entries (preserves order, keeps first occurrence)
         self.memory_entries = list(dict.fromkeys(self.memory_entries))
         self.user_entries = list(dict.fromkeys(self.user_entries))
+        self.chat_entries = list(dict.fromkeys(self.chat_entries))
 
         # Capture frozen snapshot for system prompt injection
         self._system_prompt_snapshot = {
             "memory": self._render_block("memory", self.memory_entries),
             "user": self._render_block("user", self.user_entries),
+            "chat": self._render_block("chat", self.chat_entries),
         }
 
     @staticmethod
@@ -179,34 +249,112 @@ class MemoryStore:
             fd.close()
 
     @staticmethod
-    def _path_for(target: str) -> Path:
+    def _normalize_scope_component(value: Optional[str]) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            return ""
+        cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", cleaned)
+        cleaned = cleaned.strip("._-")
+        if cleaned:
+            return cleaned
+        return hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:16]
+
+    def _legacy_user_path(self) -> Path:
+        return get_memory_dir() / "USER.md"
+
+    def _scoped_user_path(self) -> Optional[Path]:
+        if not self.platform or not self.user_id:
+            return None
+        return get_memory_dir() / "users" / self.platform / f"{self.user_id}.md"
+
+    def _scoped_chat_path(self) -> Optional[Path]:
+        if not self.platform or not self.chat_id or self.chat_type == "dm":
+            return None
+        filename = self.chat_id
+        if self.thread_id:
+            filename = f"{filename}__{self.thread_id}"
+        return get_memory_dir() / "chats" / self.platform / (self.chat_type or "group") / f"{filename}.md"
+
+    def _target_path_for_write(self, target: str) -> Optional[Path]:
         mem_dir = get_memory_dir()
         if target == "user":
-            return mem_dir / "USER.md"
+            return self._scoped_user_path()
+        if target == "chat":
+            return self._scoped_chat_path()
         return mem_dir / "MEMORY.md"
+
+    def _read_user_entries_for_prompt(self) -> List[str]:
+        scoped_path = self._scoped_user_path()
+        if scoped_path and scoped_path.exists():
+            return self._read_file(scoped_path)
+        return self._read_file(self._legacy_user_path())
+
+    def _read_chat_entries_for_prompt(self) -> List[str]:
+        scoped_path = self._scoped_chat_path()
+        if scoped_path and scoped_path.exists():
+            return self._read_file(scoped_path)
+        return []
+
+    def _require_user_scope(self) -> Optional[Dict[str, Any]]:
+        if self._scoped_user_path():
+            return None
+        return {
+            "success": False,
+            "error": (
+                "Current context has no available user identity. "
+                "Writes to target='user' require both platform and user_id."
+            ),
+        }
+
+    def _require_chat_scope(self) -> Optional[Dict[str, Any]]:
+        if self._scoped_chat_path():
+            return None
+        return {
+            "success": False,
+            "error": (
+                "Current context has no available shared chat identity. "
+                "Writes to target='chat' require a non-DM platform/chat_id scope."
+            ),
+        }
 
     def _reload_target(self, target: str):
         """Re-read entries from disk into in-memory state.
 
         Called under file lock to get the latest state before mutating.
         """
-        fresh = self._read_file(self._path_for(target))
+        path = self._target_path_for_write(target)
+        if path is None:
+            fresh = []
+        else:
+            fresh = self._read_file(path)
         fresh = list(dict.fromkeys(fresh))  # deduplicate
         self._set_entries(target, fresh)
 
     def save_to_disk(self, target: str):
         """Persist entries to the appropriate file. Called after every mutation."""
         get_memory_dir().mkdir(parents=True, exist_ok=True)
-        self._write_file(self._path_for(target), self._entries_for(target))
+        path = self._target_path_for_write(target)
+        if path is None:
+            if target == "user":
+                raise RuntimeError("Current context has no available user identity for target='user'.")
+            if target == "chat":
+                raise RuntimeError("Current context has no available shared chat identity for target='chat'.")
+            raise RuntimeError(f"No available path for target='{target}'.")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_file(path, self._entries_for(target))
 
     def _entries_for(self, target: str) -> List[str]:
         if target == "user":
             return self.user_entries
+        if target == "chat":
+            return self.chat_entries
         return self.memory_entries
 
     def _set_entries(self, target: str, entries: List[str]):
         if target == "user":
             self.user_entries = entries
+        elif target == "chat":
+            self.chat_entries = entries
         else:
             self.memory_entries = entries
 
@@ -219,6 +367,8 @@ class MemoryStore:
     def _char_limit(self, target: str) -> int:
         if target == "user":
             return self.user_char_limit
+        if target == "chat":
+            return self.chat_char_limit
         return self.memory_char_limit
 
     def add(self, target: str, content: str) -> Dict[str, Any]:
@@ -226,13 +376,23 @@ class MemoryStore:
         content = content.strip()
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
+        if target == "user":
+            scope_error = self._require_user_scope()
+            if scope_error:
+                return scope_error
+        elif target == "chat":
+            scope_error = self._require_chat_scope()
+            if scope_error:
+                return scope_error
 
         # Scan for injection/exfiltration before accepting
         scan_error = _scan_memory_content(content)
         if scan_error:
             return {"success": False, "error": scan_error}
 
-        with self._file_lock(self._path_for(target)):
+        path = self._target_path_for_write(target)
+        assert path is not None
+        with self._file_lock(path):
             # Re-read from disk under lock to pick up writes from other sessions
             self._reload_target(target)
 
@@ -274,13 +434,23 @@ class MemoryStore:
             return {"success": False, "error": "old_text cannot be empty."}
         if not new_content:
             return {"success": False, "error": "new_content cannot be empty. Use 'remove' to delete entries."}
+        if target == "user":
+            scope_error = self._require_user_scope()
+            if scope_error:
+                return scope_error
+        elif target == "chat":
+            scope_error = self._require_chat_scope()
+            if scope_error:
+                return scope_error
 
         # Scan replacement content for injection/exfiltration
         scan_error = _scan_memory_content(new_content)
         if scan_error:
             return {"success": False, "error": scan_error}
 
-        with self._file_lock(self._path_for(target)):
+        path = self._target_path_for_write(target)
+        assert path is not None
+        with self._file_lock(path):
             self._reload_target(target)
 
             entries = self._entries_for(target)
@@ -329,8 +499,18 @@ class MemoryStore:
         old_text = old_text.strip()
         if not old_text:
             return {"success": False, "error": "old_text cannot be empty."}
+        if target == "user":
+            scope_error = self._require_user_scope()
+            if scope_error:
+                return scope_error
+        elif target == "chat":
+            scope_error = self._require_chat_scope()
+            if scope_error:
+                return scope_error
 
-        with self._file_lock(self._path_for(target)):
+        path = self._target_path_for_write(target)
+        assert path is not None
+        with self._file_lock(path):
             self._reload_target(target)
 
             entries = self._entries_for(target)
@@ -402,6 +582,8 @@ class MemoryStore:
 
         if target == "user":
             header = f"USER PROFILE (who the user is) [{pct}% — {current:,}/{limit:,} chars]"
+        elif target == "chat":
+            header = f"CHAT PROFILE (shared context for this conversation) [{pct}% — {current:,}/{limit:,} chars]"
         else:
             header = f"MEMORY (your personal notes) [{pct}% — {current:,}/{limit:,} chars]"
 
@@ -477,8 +659,8 @@ def memory_tool(
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
 
-    if target not in ("memory", "user"):
-        return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
+    if target not in ("memory", "user", "chat"):
+        return tool_error(f"Invalid target '{target}'. Use 'memory', 'user', or 'chat'.", success=False)
 
     if action == "add":
         if not content:
@@ -524,18 +706,33 @@ MEMORY_SCHEMA = {
         "- You discover something about the environment (OS, installed tools, project structure)\n"
         "- You learn a convention, API quirk, or workflow specific to this user's setup\n"
         "- You identify a stable fact that will be useful again in future sessions\n\n"
+        "WHEN USING EXISTING MEMORY:\n"
+        "- Treat injected USER PROFILE / CHAT PROFILE blocks as current working context\n"
+        "- Do not ask the user to repeat facts that are already stored there\n"
+        "- If a stable fact is missing, outdated, duplicated, or scoped to the wrong target, update it\n\n"
+        "WHEN CORRECTING MEMORY:\n"
+        "- If the user corrects a stored fact, prefer replace/remove so the wrong version stops existing\n"
+        "- Do not leave contradictory old and new entries side by side\n"
+        "- Use add only when there is no conflicting stored entry to fix\n\n"
+        "ATOMIC ENTRY RULE:\n"
+        "- Each memory entry must contain exactly one durable fact\n"
+        "- Do not bundle multiple clues, roles, preferences, or facts into one entry\n"
+        "- Do not use bullet lists, semicolon-separated clauses, or multi-line bundles in one entry\n"
+        "- If you learn multiple facts, save multiple separate memory entries\n\n"
         "PRIORITY: User preferences and corrections > environment facts > procedural knowledge. "
         "The most valuable memory prevents the user from having to repeat themselves.\n\n"
         "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
         "state to memory; use session_search to recall those from past transcripts.\n"
         "If you've discovered a new way to do something, solved a problem that could be "
         "necessary later, save it as a skill with the skill tool.\n\n"
-        "TWO TARGETS:\n"
+        "THREE TARGETS:\n"
         "- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n"
-        "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
+        "- 'chat': shared facts about the current group/channel/thread -- project context, nicknames, shared norms, recurring references\n"
+        "- 'memory': your notes -- cross-chat environment facts, project conventions, tool quirks, lessons learned\n\n"
         "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
         "remove (delete -- old_text identifies it).\n\n"
-        "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
+        "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state. "
+        "Do not write group/channel facts into 'user'. Use 'chat' only when the current conversation has a shared non-DM chat scope."
     ),
     "parameters": {
         "type": "object",
@@ -547,12 +744,12 @@ MEMORY_SCHEMA = {
             },
             "target": {
                 "type": "string",
-                "enum": ["memory", "user"],
-                "description": "Which memory store: 'memory' for personal notes, 'user' for user profile."
+                "enum": ["memory", "user", "chat"],
+                "description": "Which memory store: 'memory' for global notes, 'user' for this user's profile, 'chat' for the current shared group/channel/thread profile."
             },
             "content": {
                 "type": "string",
-                "description": "The entry content. Required for 'add' and 'replace'."
+                "description": "The entry content. Required for 'add' and 'replace'. Must contain exactly one atomic durable fact."
             },
             "old_text": {
                 "type": "string",
@@ -580,7 +777,3 @@ registry.register(
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
-
-
-

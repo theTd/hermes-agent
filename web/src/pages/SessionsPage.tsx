@@ -5,7 +5,7 @@ import {
   useCallback,
   useRef,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -416,7 +416,19 @@ export default function SessionsPage() {
   const PAGE_SIZE = 20;
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const expandedId = searchParams.get("expanded") ?? null;
+  const setExpandedId = useCallback((id: string | null) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      if (id) {
+        next.set("expanded", id);
+      } else {
+        next.delete("expanded");
+      }
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
   const [searchResults, setSearchResults] = useState<
     SessionSearchResult[] | null
   >(null);
@@ -804,7 +816,7 @@ export default function SessionsPage() {
                 searchQuery={search || undefined}
                 isExpanded={expandedId === s.id}
                 onToggle={() =>
-                  setExpandedId((prev) => (prev === s.id ? null : s.id))
+                  setExpandedId(expandedId === s.id ? null : s.id)
                 }
                 onDelete={() => sessionDelete.requestDelete(s.id)}
                 resumeInChatEnabled={resumeInChatEnabled}

@@ -38,6 +38,12 @@ from tools.tool_backend_helpers import (
     managed_nous_tools_enabled,
     prefers_gateway,
 )
+from tools.image_providers.openai_compatible import (
+    _cache_generated_remote_image,
+    _generate_with_openai_compatible_backend,
+    _resolve_image_generation_backend,
+    check_custom_image_generation_backend,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -623,21 +629,23 @@ def image_generate_tool(
     num_images: Optional[int] = None,
     output_format: Optional[str] = None,
     seed: Optional[int] = None,
+    image: Optional[Union[str, list]] = None,
 ) -> str:
-    """Generate an image from a text prompt using the configured FAL model.
+    """Generate an image from a text prompt using the configured backend.
 
-    The agent-facing schema exposes only ``prompt`` and ``aspect_ratio``; the
-    remaining kwargs are overrides for direct Python callers and are filtered
-    per-model via the ``supports`` whitelist (unsupported overrides are
-    silently dropped so legacy callers don't break when switching models).
+    Uses a configured OpenAI-compatible image backend when available; otherwise
+    falls back to the user-selected FAL model. For FAL outputs we locally cache
+    the generated image and return that path for reliable downstream sending.
 
-    Returns a JSON string with ``{"success": bool, "image": url | None,
+    Returns a JSON string with ``{"success": bool, "image": path | None,
     "error": str, "error_type": str}``.
     """
     model_id, meta = _resolve_fal_model()
+    backend = _resolve_image_generation_backend()
 
     debug_call_data = {
         "model": model_id,
+        "backend": backend["selected_backend"],
         "parameters": {
             "prompt": prompt,
             "aspect_ratio": aspect_ratio,
@@ -646,6 +654,7 @@ def image_generate_tool(
             "num_images": num_images,
             "output_format": output_format,
             "seed": seed,
+            "has_reference_image": bool(image),
         },
         "error": None,
         "success": False,
@@ -659,12 +668,6 @@ def image_generate_tool(
         if not prompt or not isinstance(prompt, str) or len(prompt.strip()) == 0:
             raise ValueError("Prompt is required and must be a non-empty string")
 
-        if not (fal_key_is_configured() or _resolve_managed_fal_gateway()):
-            message = "FAL_KEY environment variable not set"
-            if managed_nous_tools_enabled():
-                message += " and managed FAL gateway is unavailable"
-            raise ValueError(message)
-
         aspect_lc = (aspect_ratio or DEFAULT_ASPECT_RATIO).lower().strip()
         if aspect_lc not in VALID_ASPECT_RATIOS:
             logger.warning(
@@ -672,6 +675,36 @@ def image_generate_tool(
                 aspect_ratio, DEFAULT_ASPECT_RATIO,
             )
             aspect_lc = DEFAULT_ASPECT_RATIO
+
+        if backend["selected_backend"] == "custom":
+            logger.info("Generating image with configured custom backend: %s", prompt[:80])
+            generated = _generate_with_openai_compatible_backend(
+                prompt=prompt,
+                aspect_ratio=aspect_lc,
+                num_images=num_images or 1,
+                output_format=output_format or "png",
+                image=image,
+            )
+            generation_time = (datetime.datetime.now() - start_time).total_seconds()
+            response_data = {
+                "success": True,
+                "image": generated["image"],
+            }
+            if generated.get("source_url"):
+                response_data["source_url"] = generated["source_url"]
+
+            debug_call_data["success"] = True
+            debug_call_data["images_generated"] = 1
+            debug_call_data["generation_time"] = generation_time
+            _debug.log_call("image_generate_tool", debug_call_data)
+            _debug.save()
+            return json.dumps(response_data, indent=2, ensure_ascii=False)
+
+        if not (os.getenv("FAL_KEY") or _resolve_managed_fal_gateway()):
+            message = "FAL_KEY environment variable not set"
+            if managed_nous_tools_enabled():
+                message += " and managed FAL gateway is unavailable"
+            raise ValueError(message)
 
         overrides: Dict[str, Any] = {}
         if num_inference_steps is not None:
@@ -719,11 +752,23 @@ def image_generate_tool(
             if should_upscale:
                 upscaled_image = _upscale_image(img["url"], prompt.strip())
                 if upscaled_image:
-                    formatted_images.append(upscaled_image)
+                    formatted_images.append(
+                        {
+                            **upscaled_image,
+                            "local_path": _cache_generated_remote_image(
+                                upscaled_image["url"],
+                                fallback_ext=f".{output_format or 'png'}",
+                            ),
+                        }
+                    )
                     continue
                 logger.warning("Using original image as fallback (upscale failed)")
 
             original_image["upscaled"] = False
+            original_image["local_path"] = _cache_generated_remote_image(
+                original_image["url"],
+                fallback_ext=f".{output_format or 'png'}",
+            )
             formatted_images.append(original_image)
 
         if not formatted_images:
@@ -737,8 +782,10 @@ def image_generate_tool(
 
         response_data = {
             "success": True,
-            "image": formatted_images[0]["url"] if formatted_images else None,
+            "image": formatted_images[0]["local_path"] if formatted_images else None,
         }
+        if formatted_images:
+            response_data["source_url"] = formatted_images[0]["url"]
 
         debug_call_data["success"] = True
         debug_call_data["images_generated"] = len(formatted_images)
@@ -808,6 +855,10 @@ def check_image_generation_requirements() -> bool:
     except Exception:
         pass
 
+    # Check custom OpenAI-compatible backend (e.g. Volcengine/Ark Seedream)
+    if check_custom_image_generation_backend():
+        return True
+
     return False
 
 
@@ -815,13 +866,21 @@ def check_image_generation_requirements() -> bool:
 # Demo / CLI entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("🎨 Image Generation Tools — FAL.ai multi-model support")
+    print("🎨 Image Generation Tools")
     print("=" * 60)
 
+    backend = _resolve_image_generation_backend()
+    if backend["custom_configured"]:
+        print("✅ Custom OpenAI-compatible image backend found")
+        print(f"🤖 Using model: {backend['model']}")
+        print(f"🌐 Base URL: {backend['base_url']}")
+        if _debug.active:
+            print(f"\n🐛 Debug mode enabled — session {_debug.session_id}")
+        raise SystemExit(0)
+
     if not check_fal_api_key():
-        print("❌ FAL_KEY environment variable not set")
-        print("   Set it via: export FAL_KEY='your-key-here'")
-        print("   Get a key: https://fal.ai/")
+        print("❌ No image generation backend configured")
+        print("   Configure image_generation.base_url/model/api_key or set FAL_KEY")
         raise SystemExit(1)
     print("✅ FAL.ai API key found")
 
@@ -873,6 +932,17 @@ IMAGE_GENERATE_SCHEMA = {
                 "description": "The aspect ratio of the generated image. 'landscape' is 16:9 wide, 'portrait' is 16:9 tall, 'square' is 1:1.",
                 "default": DEFAULT_ASPECT_RATIO,
             },
+            "image": {
+                "description": "Optional reference image for image-to-image generation. Can be a single HTTP URL, a local file path, a data URL, or an array of them when the backend supports multiple reference images.",
+                "anyOf": [
+                    {"type": "string"},
+                    {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                    },
+                ],
+            },
         },
         "required": ["prompt"],
     },
@@ -900,7 +970,12 @@ def _read_configured_image_provider():
     return None
 
 
-def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
+def _dispatch_to_plugin_provider(
+    prompt: str,
+    aspect_ratio: str,
+    *,
+    image: Optional[Union[str, list]] = None,
+):
     """Route the call to a plugin-registered provider when one is selected.
 
     Returns a JSON string on dispatch, or ``None`` to fall through to the
@@ -950,7 +1025,7 @@ def _dispatch_to_plugin_provider(prompt: str, aspect_ratio: str):
         })
 
     try:
-        result = provider.generate(prompt=prompt, aspect_ratio=aspect_ratio)
+        result = provider.generate(prompt=prompt, aspect_ratio=aspect_ratio, image=image)
     except Exception as exc:
         logger.warning(
             "Image gen provider '%s' raised: %s",
@@ -980,13 +1055,14 @@ def _handle_image_generate(args, **kw):
 
     # Route to a plugin-registered provider if one is active (and it's
     # not the in-tree FAL path).
-    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio)
+    dispatched = _dispatch_to_plugin_provider(prompt, aspect_ratio, image=args.get("image"))
     if dispatched is not None:
         return dispatched
 
     return image_generate_tool(
         prompt=prompt,
         aspect_ratio=aspect_ratio,
+        image=args.get("image"),
     )
 
 

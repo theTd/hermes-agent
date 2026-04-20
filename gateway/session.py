@@ -659,6 +659,31 @@ def build_session_key(
     return ":".join(key_parts)
 
 
+
+def resolve_session_isolation(
+    source: SessionSource,
+    *,
+    gateway_config: Optional[GatewayConfig] = None,
+    platform_extra: Optional[Dict[str, Any]] = None,
+) -> tuple[bool, bool]:
+    """Resolve per-source session isolation flags.
+
+    Default behavior follows the gateway-level config, with platform-specific
+    overrides from ``platform_extra`` when present.
+    """
+    group_default = getattr(gateway_config, "group_sessions_per_user", True)
+    thread_default = getattr(gateway_config, "thread_sessions_per_user", False)
+
+    extra = platform_extra or {}
+    group_value = extra.get("group_sessions_per_user")
+    thread_value = extra.get("thread_sessions_per_user")
+
+    return bool(group_default if group_value is None else group_value), bool(
+        thread_default if thread_value is None else thread_value
+    )
+
+
+
 class SessionStore:
     """
     Manages session storage and retrieval.
@@ -737,10 +762,21 @@ class SessionStore:
     
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
+        platform_extra = {}
+        try:
+            platform_cfg = getattr(self.config, "platforms", {}).get(source.platform)
+            platform_extra = getattr(platform_cfg, "extra", {}) or {}
+        except Exception:
+            platform_extra = {}
+        group_sessions_per_user, thread_sessions_per_user = resolve_session_isolation(
+            source,
+            gateway_config=self.config,
+            platform_extra=platform_extra,
+        )
         return build_session_key(
             source,
-            group_sessions_per_user=getattr(self.config, "group_sessions_per_user", True),
-            thread_sessions_per_user=getattr(self.config, "thread_sessions_per_user", False),
+            group_sessions_per_user=group_sessions_per_user,
+            thread_sessions_per_user=thread_sessions_per_user,
         )
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:
@@ -1236,7 +1272,13 @@ class SessionStore:
         entries.sort(key=lambda e: e.updated_at, reverse=True)
 
         return entries
-    
+
+    def get_session_entry(self, session_key: str) -> Optional[SessionEntry]:
+        """Return the current session entry for a session key, if present."""
+        with self._lock:
+            self._ensure_loaded_locked()
+            return self._entries.get(session_key)
+
     def get_transcript_path(self, session_id: str) -> Path:
         """Get the path to a session's legacy transcript file."""
         return self.sessions_dir / f"{session_id}.jsonl"
@@ -1321,7 +1363,7 @@ class SessionStore:
                                 session_id, line[:120],
                             )
 
-        # Prefer whichever source has more messages.
+        # Prefer whichever source has more *conversation* messages.
         #
         # Background: when a session pre-dates SQLite storage (or when the DB
         # layer was added while a long-lived session was already active), the
@@ -1331,12 +1373,20 @@ class SessionStore:
         # turn load_transcript returns those few SQLite rows and ignores the
         # full JSONL history — the model sees a context of 1-4 messages instead
         # of hundreds.  Using the longer source prevents this silent truncation.
-        if len(jsonl_messages) > len(db_messages):
+        #
+        # We count only chat roles (user/assistant/tool) because JSONL may
+        # contain extra non-conversation entries such as session_meta that
+        # inflate the total without adding meaningful history.
+        jsonl_chat_count = sum(
+            1 for m in jsonl_messages
+            if m.get("role") in ("user", "assistant", "tool")
+        )
+        if jsonl_chat_count > len(db_messages):
             if db_messages:
                 logger.debug(
-                    "Session %s: JSONL has %d messages vs SQLite %d — "
+                    "Session %s: JSONL has %d chat messages vs SQLite %d — "
                     "using JSONL (legacy session not yet fully migrated)",
-                    session_id, len(jsonl_messages), len(db_messages),
+                    session_id, jsonl_chat_count, len(db_messages),
                 )
             return jsonl_messages
 
@@ -1361,6 +1411,13 @@ def build_session_context(
         if home:
             home_channels[platform] = home
     
+    platform_extra = {}
+    try:
+        platform_cfg = getattr(config, "platforms", {}).get(source.platform)
+        platform_extra = getattr(platform_cfg, "extra", {}) or {}
+    except Exception:
+        platform_extra = {}
+
     context = SessionContext(
         source=source,
         connected_platforms=connected,

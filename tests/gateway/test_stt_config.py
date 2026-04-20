@@ -1,7 +1,7 @@
 """Gateway STT config tests — honor stt.enabled: false from config.yaml."""
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 import yaml
@@ -74,7 +74,7 @@ async def test_enrich_message_with_transcription_avoids_bogus_no_provider_messag
 
 
 @pytest.mark.asyncio
-async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
+async def test_prepare_inbound_message_text_exposes_queued_voice_event_for_lazy_transcription():
     from gateway.run import GatewayRunner
 
     runner = GatewayRunner.__new__(GatewayRunner)
@@ -99,11 +99,7 @@ async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
 
     with patch(
         "tools.transcription_tools.transcribe_audio",
-        return_value={
-            "success": True,
-            "transcript": "queued voice transcript",
-            "provider": "local_command",
-        },
+        side_effect=AssertionError("transcribe_audio should not run during inbound preparation"),
     ):
         result = await runner._prepare_inbound_message_text(
             event=event,
@@ -112,5 +108,6 @@ async def test_prepare_inbound_message_text_transcribes_queued_voice_event():
         )
 
     assert result is not None
-    assert "queued voice transcript" in result
-    assert "voice message" in result.lower()
+    assert "audio attachment" in result.lower()
+    assert "audio_transcribe" in result
+    assert "/tmp/queued-voice.ogg" in result

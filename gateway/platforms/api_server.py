@@ -878,8 +878,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
         stream = body.get("stream", False)
 
-        # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
-        system_prompt = None
+        # Extract system prompt from the top-level field only.
+        system_prompt = str(body.get("system") or "").strip() or None
         conversation_messages: List[Dict[str, str]] = []
 
         for idx, msg in enumerate(messages):

@@ -22,10 +22,10 @@ test runner at ``scripts/run_tests.sh``.
 import asyncio
 import logging
 import os
-import re
 import signal
 import sys
 import tempfile
+import types
 from pathlib import Path
 from unittest.mock import patch
 
@@ -239,6 +239,123 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "DINGTALK_REQUIRE_MENTION",
     "MATRIX_REQUIRE_MENTION",
 })
+def _ensure_telegram_test_double() -> None:
+    """Provide a minimal telegram module tree when python-telegram-bot is absent."""
+    try:
+        from telegram import (  # type: ignore  # noqa: F401
+            Update,
+            Bot,
+            Message,
+            InlineKeyboardButton,
+            InlineKeyboardMarkup,
+        )
+        from telegram.ext import (  # type: ignore  # noqa: F401
+            Application,
+            CommandHandler,
+            CallbackQueryHandler,
+            MessageHandler as TelegramMessageHandler,
+            ContextTypes,
+            filters,
+        )
+        from telegram.constants import ParseMode, ChatType  # type: ignore  # noqa: F401
+        from telegram.request import HTTPXRequest  # type: ignore  # noqa: F401
+        return
+    except Exception:
+        pass
+
+    existing = sys.modules.get("telegram")
+    if existing is not None and getattr(existing, "__file__", None):
+        return
+
+    class _InlineKeyboardButton:
+        def __init__(self, text, callback_data=None, **kwargs):
+            self.text = text
+            self.callback_data = callback_data
+            self.kwargs = kwargs
+
+    class _InlineKeyboardMarkup:
+        def __init__(self, inline_keyboard):
+            self.inline_keyboard = inline_keyboard
+
+    class _LinkPreviewOptions:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _HTTPXRequest:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class _ApplicationBuilder:
+        def token(self, *_args, **_kwargs):
+            return self
+
+        def request(self, *_args, **_kwargs):
+            return self
+
+        def get_updates_request(self, *_args, **_kwargs):
+            return self
+
+        def build(self):
+            raise RuntimeError("telegram test double builder must be monkeypatched in this test")
+
+    class _Application:
+        @staticmethod
+        def builder():
+            return _ApplicationBuilder()
+
+    telegram_mod = types.ModuleType("telegram")
+    telegram_mod.__file__ = "<telegram-test-double>"
+    telegram_mod.Update = types.SimpleNamespace(ALL_TYPES=[])
+    telegram_mod.Bot = object
+    telegram_mod.Message = object
+    telegram_mod.InlineKeyboardButton = _InlineKeyboardButton
+    telegram_mod.InlineKeyboardMarkup = _InlineKeyboardMarkup
+    telegram_mod.LinkPreviewOptions = _LinkPreviewOptions
+
+    telegram_error = types.ModuleType("telegram.error")
+    telegram_error.__file__ = "<telegram-test-double>"
+    telegram_error.NetworkError = type("NetworkError", (OSError,), {})
+    telegram_error.TimedOut = type("TimedOut", (OSError,), {})
+    telegram_error.BadRequest = type("BadRequest", (Exception,), {})
+    telegram_error.RetryAfter = type("RetryAfter", (Exception,), {})
+    telegram_mod.error = telegram_error
+
+    telegram_constants = types.ModuleType("telegram.constants")
+    telegram_constants.__file__ = "<telegram-test-double>"
+    telegram_constants.ParseMode = types.SimpleNamespace(
+        MARKDOWN="Markdown",
+        MARKDOWN_V2="MarkdownV2",
+        HTML="HTML",
+    )
+    telegram_constants.ChatType = types.SimpleNamespace(
+        PRIVATE="private",
+        GROUP="group",
+        SUPERGROUP="supergroup",
+        CHANNEL="channel",
+    )
+    telegram_mod.constants = telegram_constants
+
+    telegram_ext = types.ModuleType("telegram.ext")
+    telegram_ext.__file__ = "<telegram-test-double>"
+    telegram_ext.Application = _Application
+    telegram_ext.CommandHandler = object
+    telegram_ext.CallbackQueryHandler = object
+    telegram_ext.MessageHandler = object
+    telegram_ext.ContextTypes = types.SimpleNamespace(DEFAULT_TYPE=object)
+    telegram_ext.filters = object
+
+    telegram_request = types.ModuleType("telegram.request")
+    telegram_request.__file__ = "<telegram-test-double>"
+    telegram_request.HTTPXRequest = _HTTPXRequest
+
+    sys.modules["telegram"] = telegram_mod
+    sys.modules["telegram.error"] = telegram_error
+    sys.modules["telegram.constants"] = telegram_constants
+    sys.modules["telegram.ext"] = telegram_ext
+    sys.modules["telegram.request"] = telegram_request
+
+
+_ensure_telegram_test_double()
 
 
 @pytest.fixture(autouse=True)
@@ -545,4 +662,21 @@ def _reset_tool_registry_caches():
         _clear_tool_defs_cache()
     except ImportError:
         pass
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _disable_tirith_auto_install_for_gateway_tests(request, monkeypatch):
+    """Gateway tests do not need tirith background installs at runner startup."""
+    if "/tests/gateway/" not in str(request.node.fspath):
+        yield
+        return
+
+    import tools.tirith_security as tirith_security
+
+    monkeypatch.setattr(
+        tirith_security,
+        "ensure_installed",
+        lambda *args, **kwargs: None,
+    )
     yield

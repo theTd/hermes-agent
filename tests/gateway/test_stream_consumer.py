@@ -84,6 +84,17 @@ class TestCleanForDisplay:
         # But "media:" is lowercase so won't match either
         assert result == text
 
+    def test_promotion_markers_stripped_when_protocol_present(self):
+        """Promotion-only control markers should not reach the visible stream."""
+        text = "[[COMPLEXITY:5]]\n\n查一下上海现在的天气~\n[[ESCALATE_L2]]"
+        result = GatewayStreamConsumer._clean_for_display(
+            text,
+            {"no_reply_marker": "[[NO_REPLY]]", "escalate_marker": "[[ESCALATE_L2]]"},
+        )
+        assert "[[COMPLEXITY:" not in result
+        assert "[[ESCALATE_L2]]" not in result
+        assert result == "查一下上海现在的天气~"
+
 
 # ── Integration: _send_or_edit strips MEDIA: ─────────────────────────────
 

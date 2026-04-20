@@ -103,6 +103,14 @@ class MemoryProvider(ABC):
         """
         return ""
 
+    def get_last_prefetch_debug_info(self) -> Dict[str, Any]:
+        """Return provider-specific debug info for the most recent prefetch().
+
+        Used by observability to surface how injected memory context was
+        retrieved. Providers that do not track this can leave the default.
+        """
+        return {}
+
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Queue a background recall for the NEXT turn.
 
@@ -110,6 +118,21 @@ class MemoryProvider(ABC):
         by prefetch() on the next turn. Default is no-op — providers
         that do background prefetching should override this.
         """
+
+    def should_invalidate_cached_prefetch(self) -> bool:
+        """Return True when cached orchestrator recall should be dropped.
+
+        The NapCat orchestrator keeps a short-lived, in-process snapshot of
+        provider-prefetched recall so trivial follow-ups can reuse it without
+        re-querying the provider every turn. After a child/full-agent turn
+        completes, the orchestrator asks the active provider whether that
+        cached snapshot is now stale.
+
+        Providers with batched or deferred writes can override this and return
+        False while the durable recall state is unchanged. The default stays
+        conservative and invalidates the snapshot.
+        """
+        return True
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         """Persist a completed turn to the backend.
@@ -230,7 +253,7 @@ class MemoryProvider(ABC):
         """Called when the built-in memory tool writes an entry.
 
         action: 'add', 'replace', or 'remove'
-        target: 'memory' or 'user'
+        target: 'memory', 'user', or 'chat'
         content: the entry content
         metadata: structured provenance for the write, when available. Common
           keys include ``write_origin``, ``execution_context``, ``session_id``,
@@ -238,3 +261,33 @@ class MemoryProvider(ABC):
 
         Use to mirror built-in memory writes to your backend.
         """
+
+    def handle_memory_write(
+        self,
+        action: str,
+        target: str,
+        *,
+        content: str | None = None,
+        old_text: str | None = None,
+    ) -> str:
+        """Handle Hermes' built-in ``memory`` tool directly.
+
+        Providers may override this when they want to become the primary
+        backing store for the ``memory`` tool (for example when built-in
+        file memory is disabled and the external provider is the only
+        memory source of truth).
+
+        Must return a JSON string (the tool result).
+        """
+        raise NotImplementedError(
+            f"Provider {self.name} does not handle builtin memory writes"
+        )
+
+    def build_live_memory_snapshot(self) -> str:
+        """Return a best-effort snapshot of current durable memory state.
+
+        Used by gateway flush guards so background memory extraction can see
+        the provider's current authoritative state before attempting writes.
+        Return empty string when unavailable.
+        """
+        return ""

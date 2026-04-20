@@ -118,7 +118,7 @@ class TestSchemaConversion:
         )
         schema = _convert_mcp_schema("crawl4ai", mcp_tool)
 
-        assert schema["parameters"] == {"type": "object", "properties": {}}
+        assert schema["parameters"] == {"type": "object"}
 
     def test_definitions_refs_are_rewritten_to_defs(self):
         from tools.mcp_tool import _convert_mcp_schema
@@ -308,7 +308,6 @@ class TestSchemaConversion:
 
         assert schema["name"] == "mcp_my_server_get_sum"
         assert "-" not in schema["name"]
-
 
 # ---------------------------------------------------------------------------
 # Check function
@@ -2292,7 +2291,7 @@ class TestSamplingCallbackText:
             "function": {
                 "name": "ask",
                 "description": "Ask Crawl4AI",
-                "parameters": {"type": "object", "properties": {}},
+                "parameters": {"type": "object"},
             },
         }]
 

@@ -1,6 +1,7 @@
 """Tests for model_tools.py — function call dispatch, agent-loop interception, legacy toolsets."""
 
 import json
+from pathlib import Path
 from unittest.mock import call, patch
 
 import pytest
@@ -82,6 +83,55 @@ class TestHandleFunctionCall:
                 tool_call_id="call-1",
             ),
         ]
+
+
+def test_core_modules_use_agent_event_bridge():
+    run_agent_source = Path("run_agent.py").read_text(encoding="utf-8")
+    assert "from agent.observability_bridge import" in run_agent_source
+    assert "from gateway.agent_events import" not in run_agent_source
+    assert "from gateway.napcat_observability" not in run_agent_source
+
+    model_tools_source = Path("model_tools.py").read_text(encoding="utf-8")
+    assert "from agent.tool_event_instrumentation import" in model_tools_source
+    assert "from gateway.agent_events import" not in model_tools_source
+    assert "from gateway.napcat_observability" not in model_tools_source
+
+    gateway_run = Path("gateway/run.py").read_text(encoding="utf-8")
+    assert "from gateway.agent_events import" in gateway_run
+    assert "AgentEventType as _NapCatEventType" not in gateway_run
+    assert "AgentEventSeverity as _NapCatSeverity" not in gateway_run
+    assert "from gateway.napcat_observability.publisher" not in gateway_run
+    assert "from gateway.napcat_observability.schema" not in gateway_run
+    assert "from gateway.napcat_observability.trace" not in gateway_run
+    assert "_napcat_trace_ctx" not in gateway_run
+    assert "napcat_referenced_image_urls" not in gateway_run
+    assert "napcat_vision_cache" not in gateway_run
+
+    gateway_agent_events = Path("gateway/agent_events.py").read_text(encoding="utf-8")
+    assert "from gateway.observability_backend import" in gateway_agent_events
+    assert "from gateway.napcat_observability.publisher" not in gateway_agent_events
+    assert "from gateway.napcat_observability.schema" not in gateway_agent_events
+    assert "from gateway.napcat_observability.trace" not in gateway_agent_events
+
+    runtime_extension_source = Path("gateway/runtime_extension.py").read_text(encoding="utf-8")
+    assert "from gateway.runtime_extension_loader import" in runtime_extension_source
+    assert "NapCatGatewayExtension" not in runtime_extension_source
+
+    config_extension_source = Path("gateway/config_extension.py").read_text(encoding="utf-8")
+    assert "from gateway.config_extension_loader import" in config_extension_source
+    assert "NapCatGatewayConfigExtension" not in config_extension_source
+
+    observability_backend_source = Path("gateway/observability_backend.py").read_text(encoding="utf-8")
+    assert "from gateway.observability_backend_loader import" in observability_backend_source
+    assert "NapCatObservabilityBackend" not in observability_backend_source
+
+    cli_main_source = Path("hermes_cli/main.py").read_text(encoding="utf-8")
+    assert "from hermes_cli.commands_extension import" in cli_main_source
+    assert "from hermes_cli.napcat_commands import" not in cli_main_source
+
+    cli_commands_extension_source = Path("hermes_cli/commands_extension.py").read_text(encoding="utf-8")
+    assert "from hermes_cli.commands_extension_loader import" in cli_commands_extension_source
+    assert "register_napcat_cli_commands" not in cli_commands_extension_source
 
 
 # =========================================================================

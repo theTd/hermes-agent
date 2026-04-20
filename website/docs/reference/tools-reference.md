@@ -6,9 +6,9 @@ description: "Authoritative reference for Hermes built-in tools, grouped by tool
 
 # Built-in Tools Reference
 
-This page documents all 55 built-in tools in the Hermes tool registry, grouped by toolset. Availability varies by platform, credentials, and enabled toolsets.
+This page documents all 56 built-in tools in the Hermes tool registry, grouped by toolset. Availability varies by platform, credentials, and enabled toolsets.
 
-**Quick counts:** 12 browser tools, 4 file tools, 10 RL tools, 4 Home Assistant tools, 2 terminal tools, 2 web tools, 5 Feishu tools, and 15 standalone tools across other toolsets.
+**Quick counts:** 11 browser tools, 4 file tools, 10 RL tools, 4 Home Assistant tools, 2 terminal tools, 2 web tools, 5 Feishu tools, and 18 standalone tools across other toolsets.
 
 :::tip MCP Tools
 In addition to built-in tools, Hermes can load tools dynamically from MCP servers. MCP tools appear with a server-name prefix (e.g., `github_create_issue` for the `github` MCP server). See [MCP Integration](/docs/user-guide/features/mcp) for configuration.
@@ -108,6 +108,13 @@ Scoped to the Feishu document-comment handler. Drives comment read/write operati
 |------|-------------|----------------------|
 | `memory` | Save important information to persistent memory that survives across sessions. Your memory appears in your system prompt at session start -- it's how you remember things about the user and your environment between conversations. WHEN TO SA… | — |
 
+## `napcat` toolset
+
+| Tool | Description | Requires environment |
+|------|-------------|----------------------|
+| `napcat_manage_settings` | Inspect and update Hermes NapCat / QQ admin settings for the current session. Use this inside a NapCat session for tasks like adding or removing super admins, changing the current group's personality, toggling group trigger rules, editing current-group allow/deny lists, or setting the current group's model override. This tool writes structured config changes and reports that a gateway restart is required for full effect. Do not use it for API keys, tokens, ws_url, or arbitrary config editing. | — |
+| `napcat_read_history` | Read QQ/NapCat message history for the current NapCat session. Automatically binds to the current group or current private chat and pages through NapCat's history APIs using `count`, `message_seq`, and `reverse_order`. Only available inside an active NapCat gateway session. | — |
+
 ## `messaging` toolset
 
 | Tool | Description | Requires environment |
@@ -180,5 +187,3 @@ Scoped to the Feishu document-comment handler. Drives comment read/write operati
 | Tool | Description | Requires environment |
 |------|-------------|----------------------|
 | `text_to_speech` | Convert text to speech audio. Returns a MEDIA: path that the platform delivers as a voice message. On Telegram it plays as a voice bubble, on Discord/WhatsApp as an audio attachment. In CLI mode, saves to ~/voice-memos/. Voice and provider… | — |
-
-

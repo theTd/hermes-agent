@@ -185,7 +185,7 @@ coder config set terminal.cwd /absolute/path/to/project
 
 ## Updating
 
-`hermes update` pulls code once (shared) and syncs new bundled skills to **all** profiles automatically:
+`hermes update` syncs the standalone `napcat` branch once (shared) and syncs new bundled skills to **all** profiles automatically:
 
 ```bash
 hermes update

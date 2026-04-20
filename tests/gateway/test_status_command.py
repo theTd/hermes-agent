@@ -420,3 +420,53 @@ async def test_profile_command_reports_custom_root_profile(monkeypatch, tmp_path
 
     assert "**Profile:** `coder`" in result
     assert f"**Home:** `{profile_home}`" in result
+
+
+@pytest.mark.asyncio
+async def test_media_send_failure_notifies_user():
+    import asyncio
+    from gateway.platforms.base import BasePlatformAdapter
+
+    source = _make_source()
+    session_key = build_session_key(source)
+
+    async def fake_handler(_event):
+        return "MEDIA:/tmp/missing-report.pdf"
+
+    class _ConcreteAdapter(BasePlatformAdapter):
+        platform = Platform.TELEGRAM
+
+        async def connect(self): pass
+        async def disconnect(self): pass
+        async def send(self, chat_id, content, **kwargs): pass
+        async def get_chat_info(self, chat_id): return {}
+
+    platform_config = PlatformConfig(enabled=True, token="***")
+    adapter = _ConcreteAdapter(platform_config, Platform.TELEGRAM)
+    adapter.set_message_handler(fake_handler)
+
+    async def fake_send_document(chat_id, file_path, metadata=None, reply_to=None):
+        return SimpleNamespace(success=False, error=f"File not found: {file_path}")
+
+    sent = []
+
+    async def fake_send_with_retry(chat_id, content, reply_to=None, metadata=None):
+        sent.append(content)
+        return SimpleNamespace(success=True)
+
+    adapter.send_document = fake_send_document
+    adapter._send_with_retry = fake_send_with_retry
+    adapter._keep_typing = AsyncMock(return_value=None)
+    adapter._run_processing_hook = AsyncMock(return_value=None)
+    adapter._active_sessions[session_key] = asyncio.Event()
+
+    event = MessageEvent(
+        text="send file",
+        source=source,
+        message_id="m1",
+    )
+
+    await adapter._process_message_background(event, session_key)
+
+    assert any("附件发送失败" in msg for msg in sent)
+    assert any("missing-report.pdf" in msg for msg in sent)

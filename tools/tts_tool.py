@@ -956,7 +956,10 @@ def text_to_speech_tool(
     # produce Opus natively (no ffmpeg needed).  Edge TTS always outputs MP3
     # and needs ffmpeg for conversion.
     from gateway.session_context import get_session_env
-    platform = get_session_env("HERMES_SESSION_PLATFORM", "").lower()
+    platform = (
+        get_session_env("HERMES_SESSION_PLATFORM", "")
+        or os.getenv("HERMES_SESSION_PLATFORM", "")
+    ).lower()
     want_opus = (platform == "telegram")
 
     # Determine output path
@@ -1141,6 +1144,8 @@ def check_tts_requirements() -> bool:
     Returns:
         bool: True if at least one provider can work.
     """
+    provider = _get_provider(_load_tts_config())
+
     try:
         _import_edge_tts()
         return True
@@ -1158,9 +1163,9 @@ def check_tts_requirements() -> bool:
             return True
     except ImportError:
         pass
-    if os.getenv("MINIMAX_API_KEY"):
+    if provider == "minimax" and os.getenv("MINIMAX_API_KEY"):
         return True
-    if os.getenv("XAI_API_KEY"):
+    if provider == "xai" and os.getenv("XAI_API_KEY"):
         return True
     if os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"):
         return True

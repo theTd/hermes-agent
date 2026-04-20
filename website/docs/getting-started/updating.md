@@ -14,7 +14,7 @@ Update to the latest version with a single command:
 hermes update
 ```
 
-This pulls the latest code, updates dependencies, and prompts you to configure any new options that were added since your last update.
+This syncs the latest code from the standalone `napcat` branch, updates dependencies, and prompts you to configure any new options that were added since your last update.
 
 :::tip
 `hermes update` automatically detects new configuration options and prompts you to add them. If you skipped that prompt, you can manually run `hermes config check` to see missing options, then `hermes config migrate` to interactively add them.
@@ -24,7 +24,7 @@ This pulls the latest code, updates dependencies, and prompts you to configure a
 
 When you run `hermes update`, the following steps occur:
 
-1. **Git pull** — pulls the latest code from the `main` branch and updates submodules
+1. **Git sync** — fetches the standalone `napcat` branch and aligns the local checkout to it
 2. **Dependency install** — runs `uv pip install -e ".[all]"` to pick up new or changed dependencies
 3. **Config migration** — detects new config options added since your version and prompts you to set them
 4. **Gateway auto-restart** — if the gateway service is running (systemd on Linux, launchd on macOS), it is **automatically restarted** after the update completes so the new code takes effect immediately
@@ -34,7 +34,7 @@ Expected output looks like:
 ```
 $ hermes update
 Updating Hermes Agent...
-📥 Pulling latest code...
+📥 Syncing latest code from theTd/hermes-agent:napcat...
 Already up to date.  (or: Updating abc1234..def5678)
 📦 Updating dependencies...
 ✅ Dependencies updated
@@ -80,7 +80,7 @@ You no longer need to wrap `hermes update` in `screen` or `tmux` to survive a te
 hermes version
 ```
 
-Compare against the latest release at the [GitHub releases page](https://github.com/NousResearch/hermes-agent/releases).
+Compare against the latest code on [theTd/hermes-agent](https://github.com/theTd/hermes-agent).
 
 ### Updating from Messaging Platforms
 
@@ -100,8 +100,10 @@ If you installed manually (not via the quick installer):
 cd /path/to/hermes-agent
 export VIRTUAL_ENV="$(pwd)/venv"
 
-# Pull latest code and submodules
-git pull origin main
+# Sync latest code and submodules
+git fetch origin
+git checkout napcat
+git reset --hard origin/napcat
 git submodule update --init --recursive
 
 # Reinstall (picks up new dependencies)

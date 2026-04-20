@@ -27,9 +27,11 @@ class FakeMemoryProvider(MemoryProvider):
         self.session_end_called = False
         self.pre_compress_called = False
         self.memory_writes = []
+        self.memory_tool_calls = []
         self.shutdown_called = False
         self._prefetch_result = ""
         self._prompt_block = ""
+        self._live_snapshot = ""
 
     @property
     def name(self) -> str:
@@ -76,6 +78,21 @@ class FakeMemoryProvider(MemoryProvider):
     def on_memory_write(self, action, target, content):
         self.memory_writes.append((action, target, content))
 
+    def handle_memory_write(self, action, target, *, content=None, old_text=None):
+        self.memory_tool_calls.append((action, target, content, old_text))
+        return json.dumps(
+            {
+                "success": True,
+                "action": action,
+                "target": target,
+                "content": content,
+                "old_text": old_text,
+            }
+        )
+
+    def build_live_memory_snapshot(self):
+        return self._live_snapshot
+
 
 class MetadataMemoryProvider(FakeMemoryProvider):
     """Provider that opts into write metadata."""
@@ -112,6 +129,7 @@ class TestMemoryProviderABC:
         p.queue_prefetch("query")
         p.sync_turn("user", "assistant")
         p.shutdown()
+        assert p.build_live_memory_snapshot() == ""
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +242,43 @@ class TestMemoryManager:
         mgr.queue_prefetch_all("next turn")
         assert p1.queued_prefetches == ["next turn"]
         assert p2.queued_prefetches == ["next turn"]
+
+    def test_handle_memory_write_routes_to_external_provider(self):
+        mgr = MemoryManager()
+        builtin = FakeMemoryProvider("builtin")
+        external = FakeMemoryProvider("lightrag")
+        mgr.add_provider(builtin)
+        mgr.add_provider(external)
+
+        result = json.loads(
+            mgr.handle_memory_write(
+                "replace",
+                "user",
+                content="Alice prefers concise replies",
+                old_text="Alice likes verbose replies",
+            )
+        )
+
+        assert result["success"] is True
+        assert external.memory_tool_calls == [
+            (
+                "replace",
+                "user",
+                "Alice prefers concise replies",
+                "Alice likes verbose replies",
+            )
+        ]
+
+    def test_build_live_memory_snapshot_skips_builtin(self):
+        mgr = MemoryManager()
+        builtin = FakeMemoryProvider("builtin")
+        builtin._live_snapshot = "builtin snapshot"
+        external = FakeMemoryProvider("lightrag")
+        external._live_snapshot = "provider snapshot"
+        mgr.add_provider(builtin)
+        mgr.add_provider(external)
+
+        assert mgr.build_live_memory_snapshot() == "provider snapshot"
 
     def test_sync_all(self):
         mgr = MemoryManager()

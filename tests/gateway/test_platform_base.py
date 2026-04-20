@@ -4,6 +4,7 @@ import os
 from unittest.mock import patch
 
 from gateway.platforms.base import (
+    AdapterTurnPlan,
     BasePlatformAdapter,
     GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE,
     MessageEvent,
@@ -117,6 +118,17 @@ class TestMessageEventGetCommandArgs:
         assert event.get_command_args() == "hello world"
 
 
+class TestAdapterTurnPlan:
+    def test_controller_context_is_normalized(self):
+        plan = AdapterTurnPlan(controller_context=" <persona>generic</persona> ")
+        assert plan.controller_context == "<persona>generic</persona>"
+
+    def test_lookup_reads_controller_context(self):
+        plan = AdapterTurnPlan(controller_context="<persona>generic</persona>")
+        assert plan.get("controller_context") == "<persona>generic</persona>"
+        assert plan["controller_context"] == "<persona>generic</persona>"
+
+
 # ---------------------------------------------------------------------------
 # extract_images
 # ---------------------------------------------------------------------------
@@ -173,14 +185,18 @@ class TestExtractImages:
 
     def test_fal_cdn_url(self):
         content = "![](https://fal-cdn.example.com/result)"
-        images, _ = BasePlatformAdapter.extract_images(content)
+        images, _ = BasePlatformAdapter.extract_images(
+            content, extra_domains=["fal-cdn"]
+        )
         assert len(images) == 1
         assert images[0][0] == "https://fal-cdn.example.com/result"
         assert images[0][1] == ""
 
     def test_replicate_delivery(self):
         content = "![](https://replicate.delivery/pbxt/abc/output)"
-        images, _ = BasePlatformAdapter.extract_images(content)
+        images, _ = BasePlatformAdapter.extract_images(
+            content, extra_domains=["replicate.delivery"]
+        )
         assert len(images) == 1
         assert images[0][0] == "https://replicate.delivery/pbxt/abc/output"
         assert images[0][1] == ""
@@ -235,6 +251,31 @@ class TestExtractImages:
         content = "![file](file:///local/path.png)"
         images, _ = BasePlatformAdapter.extract_images(content)
         assert images == []
+
+    def test_bare_image_url_is_extracted(self):
+        content = "Some plain test text\nhttps://example.com/output.png"
+        images, cleaned = BasePlatformAdapter.extract_images(content)
+        assert images == [("https://example.com/output.png", "")]
+        assert cleaned == "Some plain test text"
+
+    def test_bare_image_url_with_query_is_extracted(self):
+        content = (
+            "Image generated\n"
+            "https://cdn.example.com/images/result_0.png"
+            "?X-Algorithm=HMAC-SHA256&X-Signature=deadbeef"
+        )
+        images, cleaned = BasePlatformAdapter.extract_images(content)
+        assert len(images) == 1
+        assert images[0][0].startswith(
+            "https://cdn.example.com/images/result_0.png"
+        )
+        assert cleaned == "Image generated"
+
+    def test_bare_non_image_url_is_preserved(self):
+        content = "Document here\nhttps://example.com/report.pdf"
+        images, cleaned = BasePlatformAdapter.extract_images(content)
+        assert images == []
+        assert cleaned == content
 
     def test_non_image_link_preserved_when_mixed_with_images(self):
         """Regression: non-image markdown links must not be silently removed
@@ -421,6 +462,52 @@ class TestTruncateMessage:
             )
 
 
+class TestTraceMetadataAugmentation:
+    def _adapter(self):
+        class TraceAdapter(BasePlatformAdapter):
+            TRACE_CONTEXT_ATTR = "custom_trace_ctx"
+            TRACE_METADATA_KEY = "_custom_trace_ctx"
+
+            def _augment_trace_metadata(self, event, metadata=None):
+                from gateway.napcat_trace_helpers import augment_trace_metadata
+                return augment_trace_metadata(
+                    event,
+                    metadata,
+                    trace_attr=self.TRACE_CONTEXT_ATTR,
+                    metadata_key=self.TRACE_METADATA_KEY,
+                )
+
+            async def connect(self):
+                return True
+
+            async def disconnect(self):
+                pass
+
+            async def send(self, *a, **kw):
+                pass
+
+            async def get_chat_info(self, *a):
+                return {}
+
+        from gateway.config import Platform, PlatformConfig
+
+        config = PlatformConfig(enabled=True, token="test")
+        return TraceAdapter(config=config, platform=Platform.TELEGRAM)
+
+    def test_augment_trace_metadata_uses_adapter_declared_keys(self):
+        adapter = self._adapter()
+        trace_ctx = object()
+        event = MessageEvent(text="hello")
+        event.custom_trace_ctx = trace_ctx
+
+        metadata = adapter._augment_trace_metadata(event, {"thread_id": "thread-1"})
+
+        assert metadata == {
+            "thread_id": "thread-1",
+            "_custom_trace_ctx": trace_ctx,
+        }
+
+
 # ---------------------------------------------------------------------------
 # _get_human_delay
 # ---------------------------------------------------------------------------
@@ -581,4 +668,3 @@ class TestTruncateMessageUtf16:
             assert fence_count % 2 == 0, (
                 f"Chunk {i} has unbalanced fences ({fence_count})"
             )
-

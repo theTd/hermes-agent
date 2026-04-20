@@ -140,9 +140,63 @@ class TestBasePlatformTopicSessions:
                 "metadata": {"thread_id": "17585"},
             }
         ]
+
+    @pytest.mark.asyncio
+    async def test_process_message_background_uses_reply_override_when_present(self):
+        adapter = DummyTelegramAdapter()
+
+        async def handler(_event):
+            await asyncio.sleep(0)
+            return "ack"
+
+        async def hold_typing(_chat_id, interval=2.0, metadata=None):
+            await asyncio.Event().wait()
+
+        adapter.set_message_handler(handler)
+        adapter._keep_typing = hold_typing
+
+        event = _make_event("-1001", "17585", message_id="old-msg")
+        event.metadata = {"response_reply_to_message_id": "new-msg"}
+        await adapter._process_message_background(event, build_session_key(event.source))
+
+        assert adapter.sent == [
+            {
+                "chat_id": "-1001",
+                "content": "ack",
+                "reply_to": "new-msg",
+                "metadata": {"thread_id": "17585"},
+            }
+        ]
         assert adapter.processing_hooks == [
-            ("start", "1"),
-            ("complete", "1", ProcessingOutcome.SUCCESS),
+            ("start", "old-msg"),
+            ("complete", "old-msg", ProcessingOutcome.SUCCESS),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_process_message_background_media_uses_reply_override_when_present(self):
+        adapter = DummyTelegramAdapter()
+
+        async def handler(_event):
+            await asyncio.sleep(0)
+            return "MEDIA:/tmp/demo.png"
+
+        async def hold_typing(_chat_id, interval=2.0, metadata=None):
+            await asyncio.Event().wait()
+
+        adapter.set_message_handler(handler)
+        adapter._keep_typing = hold_typing
+
+        event = _make_event("-1001", "17585", message_id="old-msg")
+        event.metadata = {"response_reply_to_message_id": "new-msg"}
+        await adapter._process_message_background(event, build_session_key(event.source))
+
+        assert adapter.sent == [
+            {
+                "chat_id": "-1001",
+                "content": "🖼️ Image: /tmp/demo.png",
+                "reply_to": "new-msg",
+                "metadata": None,
+            }
         ]
 
     @pytest.mark.asyncio

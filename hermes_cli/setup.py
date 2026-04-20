@@ -2061,6 +2061,22 @@ def _setup_signal():
     _gateway_setup_signal()
 
 
+def _setup_gateway_standard_platform(platform_key: str):
+    """Configure a standard gateway platform via the canonical gateway metadata."""
+    from hermes_cli.gateway import (
+        _PLATFORMS as _gateway_platforms,
+        _setup_standard_platform as _gateway_setup_standard_platform,
+    )
+
+    platform = next(p for p in _gateway_platforms if p["key"] == platform_key)
+    _gateway_setup_standard_platform(platform)
+
+
+def _setup_napcat():
+    """Configure NapCat / QQ via gateway setup."""
+    _setup_gateway_standard_platform("napcat")
+
+
 def _setup_email():
     """Configure Email via gateway setup."""
     from hermes_cli.gateway import _setup_email as _gateway_setup_email
@@ -2220,6 +2236,7 @@ def _setup_webhooks():
 _GATEWAY_PLATFORMS = [
     ("Telegram", "TELEGRAM_BOT_TOKEN", _setup_telegram),
     ("Discord", "DISCORD_BOT_TOKEN", _setup_discord),
+    ("NapCat / QQ", "NAPCAT_WS_URL", _setup_napcat),
     ("Slack", "SLACK_BOT_TOKEN", _setup_slack),
     ("Signal", "SIGNAL_HTTP_URL", _setup_signal),
     ("Email", "EMAIL_ADDRESS", _setup_email),
@@ -2272,6 +2289,7 @@ def setup_gateway(config: dict):
     any_messaging = (
         get_env_value("TELEGRAM_BOT_TOKEN")
         or get_env_value("DISCORD_BOT_TOKEN")
+        or get_env_value("NAPCAT_WS_URL")
         or get_env_value("SLACK_BOT_TOKEN")
         or get_env_value("SIGNAL_HTTP_URL")
         or get_env_value("EMAIL_ADDRESS")
@@ -2303,6 +2321,8 @@ def setup_gateway(config: dict):
             "DISCORD_HOME_CHANNEL"
         ):
             missing_home.append("Discord")
+        if get_env_value("NAPCAT_WS_URL") and not get_env_value("NAPCAT_HOME_CHANNEL"):
+            missing_home.append("NapCat")
         if get_env_value("SLACK_BOT_TOKEN") and not get_env_value("SLACK_HOME_CHANNEL"):
             missing_home.append("Slack")
         if get_env_value("BLUEBUBBLES_SERVER_URL") and not get_env_value("BLUEBUBBLES_HOME_CHANNEL"):

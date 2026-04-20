@@ -70,6 +70,7 @@ Thread safety:
 """
 
 import asyncio
+import copy
 import concurrent.futures
 import inspect
 import json
@@ -781,9 +782,7 @@ class SamplingHandler:
                     "function": {
                         "name": getattr(t, "name", ""),
                         "description": getattr(t, "description", "") or "",
-                        "parameters": _normalize_mcp_input_schema(
-                            getattr(t, "inputSchema", None)
-                        ),
+                        "parameters": getattr(t, "inputSchema", None) or {"type": "object", "properties": {}},
                     },
                 }
                 for t in server_tools
@@ -2365,6 +2364,8 @@ def _normalize_mcp_input_schema(schema: dict | None) -> dict:
         normalized = {**normalized, "properties": {}}
 
     return normalized
+
+
 
 
 def sanitize_mcp_name_component(value: str) -> str:

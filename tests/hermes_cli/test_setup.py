@@ -223,6 +223,75 @@ def test_setup_gateway_in_container_shows_docker_guidance(monkeypatch, capsys):
     assert "restart" in out.lower()
 
 
+def test_setup_gateway_includes_napcat_and_counts_it_as_configured(monkeypatch, capsys):
+    env = {
+        "TELEGRAM_BOT_TOKEN": "",
+        "TELEGRAM_HOME_CHANNEL": "",
+        "DISCORD_BOT_TOKEN": "",
+        "DISCORD_HOME_CHANNEL": "",
+        "NAPCAT_WS_URL": "ws://127.0.0.1:3001/",
+        "NAPCAT_HOME_CHANNEL": "group:123456",
+        "SLACK_BOT_TOKEN": "",
+        "SLACK_HOME_CHANNEL": "",
+        "SIGNAL_HTTP_URL": "",
+        "EMAIL_ADDRESS": "",
+        "TWILIO_ACCOUNT_SID": "",
+        "MATTERMOST_TOKEN": "",
+        "MATRIX_ACCESS_TOKEN": "",
+        "MATRIX_PASSWORD": "",
+        "WHATSAPP_ENABLED": "",
+        "DINGTALK_CLIENT_ID": "",
+        "FEISHU_APP_ID": "",
+        "WECOM_BOT_ID": "",
+        "WEIXIN_ACCOUNT_ID": "",
+        "BLUEBUBBLES_SERVER_URL": "",
+        "WEBHOOK_ENABLED": "",
+    }
+    prompt_state = {}
+
+    def fake_prompt_checklist(_question, items, pre_selected):
+        prompt_state["items"] = items
+        prompt_state["pre_selected"] = pre_selected
+        return [items.index("NapCat / QQ  (configured)")]
+
+    monkeypatch.setattr(
+        setup_mod,
+        "_GATEWAY_PLATFORMS",
+        [
+            (name, env_var, (lambda: None) if name == "NapCat / QQ" else setup_func)
+            for name, env_var, setup_func in setup_mod._GATEWAY_PLATFORMS
+        ],
+    )
+    monkeypatch.setattr(setup_mod, "get_env_value", lambda key: env.get(key, ""))
+    monkeypatch.setattr(setup_mod, "prompt_checklist", fake_prompt_checklist)
+    monkeypatch.setattr(setup_mod, "prompt_yes_no", lambda *args, **kwargs: False)
+    monkeypatch.setattr("platform.system", lambda: "Linux")
+
+    import hermes_cli.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "supports_systemd_services", lambda: False)
+    monkeypatch.setattr(gateway_mod, "is_macos", lambda: False)
+    monkeypatch.setattr(gateway_mod, "_is_service_installed", lambda: False)
+    monkeypatch.setattr(gateway_mod, "_is_service_running", lambda: False)
+
+    setup_mod.setup_gateway({})
+
+    out = capsys.readouterr().out
+    assert "NapCat / QQ  (configured)" in prompt_state["items"]
+    assert prompt_state["pre_selected"] == [2]
+    assert "Messaging platforms configured!" in out
+
+
+def test_setup_napcat_delegates_to_gateway_standard_platform(monkeypatch):
+    seen = []
+
+    monkeypatch.setattr(setup_mod, "_setup_gateway_standard_platform", seen.append)
+
+    setup_mod._setup_napcat()
+
+    assert seen == ["napcat"]
+
+
 def test_setup_syncs_custom_provider_removal_from_disk(tmp_path, monkeypatch):
     """Removing the last custom provider in model setup should persist."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))

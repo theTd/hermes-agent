@@ -25,6 +25,7 @@ class TestInterruptPropagationToChild(unittest.TestCase):
     def _make_bare_agent(self):
         """Create a bare AIAgent via __new__ with all interrupt-related attrs."""
         from run_agent import AIAgent
+        from agent.runtime_context import AgentRuntimeContext
         agent = AIAgent.__new__(AIAgent)
         agent._interrupt_requested = False
         agent._interrupt_message = None
@@ -38,6 +39,7 @@ class TestInterruptPropagationToChild(unittest.TestCase):
         agent.provider = "openrouter"
         agent.model = "test/model"
         agent._base_url = "http://localhost:1234"
+        agent.runtime_context = AgentRuntimeContext()
         return agent
 
     def test_parent_interrupt_sets_child_flag(self):

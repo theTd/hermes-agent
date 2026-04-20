@@ -92,6 +92,7 @@ class MemoryManager:
         self._providers: List[MemoryProvider] = []
         self._tool_to_provider: Dict[str, MemoryProvider] = {}
         self._has_external: bool = False  # True once a non-builtin provider is added
+        self._last_prefetch_details: List[Dict[str, Any]] = []
 
     # -- Registration --------------------------------------------------------
 
@@ -182,18 +183,36 @@ class MemoryManager:
         Returns merged context text labeled by provider. Empty providers
         are skipped. Failures in one provider don't block others.
         """
-        parts = []
+        details = self.prefetch_all_with_details(query, session_id=session_id)
+        self._last_prefetch_details = details
+        return "\n\n".join(detail["content"] for detail in details)
+
+    def prefetch_all_with_details(self, query: str, *, session_id: str = "") -> List[Dict[str, Any]]:
+        """Collect prefetch context plus provider attribution.
+
+        Each returned item has:
+          - provider: provider name
+          - content: non-empty prefetched text
+        """
+        details: List[Dict[str, Any]] = []
         for provider in self._providers:
             try:
                 result = provider.prefetch(query, session_id=session_id)
                 if result and result.strip():
-                    parts.append(result)
+                    detail: Dict[str, Any] = {
+                        "provider": provider.name,
+                        "content": result,
+                    }
+                    debug_info = provider.get_last_prefetch_debug_info()
+                    if isinstance(debug_info, dict) and debug_info:
+                        detail["prefetch_debug"] = debug_info
+                    details.append(detail)
             except Exception as e:
                 logger.debug(
                     "Memory provider '%s' prefetch failed (non-fatal): %s",
                     provider.name, e,
                 )
-        return "\n\n".join(parts)
+        return details
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""
@@ -246,6 +265,10 @@ class MemoryManager:
     def has_tool(self, tool_name: str) -> bool:
         """Check if any provider handles this tool."""
         return tool_name in self._tool_to_provider
+
+    def get_provider_for_tool(self, tool_name: str) -> Optional[MemoryProvider]:
+        """Return the provider that owns a memory tool."""
+        return self._tool_to_provider.get(tool_name)
 
     def handle_tool_call(
         self, tool_name: str, args: Dict[str, Any], **kwargs
@@ -368,6 +391,49 @@ class MemoryManager:
                     "Memory provider '%s' on_memory_write failed: %s",
                     provider.name, e,
                 )
+
+    def handle_memory_write(
+        self,
+        action: str,
+        target: str,
+        *,
+        content: str | None = None,
+        old_text: str | None = None,
+    ) -> str:
+        """Route Hermes' built-in ``memory`` tool to the active external provider."""
+        provider = next((p for p in self._providers if p.name != "builtin"), None)
+        if provider is None:
+            return tool_error("No external memory provider is active.", success=False)
+        try:
+            return provider.handle_memory_write(
+                action,
+                target,
+                content=content,
+                old_text=old_text,
+            )
+        except Exception as e:
+            logger.error(
+                "Memory provider '%s' handle_memory_write failed: %s",
+                provider.name, e,
+            )
+            return tool_error(f"Memory write failed: {e}", success=False)
+
+    def build_live_memory_snapshot(self) -> str:
+        """Collect a best-effort live snapshot from external providers."""
+        parts = []
+        for provider in self._providers:
+            if provider.name == "builtin":
+                continue
+            try:
+                block = provider.build_live_memory_snapshot()
+                if block and block.strip():
+                    parts.append(block)
+            except Exception as e:
+                logger.debug(
+                    "Memory provider '%s' build_live_memory_snapshot failed: %s",
+                    provider.name, e,
+                )
+        return "\n\n".join(parts)
 
     def on_delegation(self, task: str, result: str, *,
                       child_session_id: str = "", **kwargs) -> None:

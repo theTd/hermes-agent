@@ -36,6 +36,7 @@ _EXTRA_ENV_KEYS = frozenset({
     "OPENAI_API_KEY", "OPENAI_BASE_URL",
     "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN",
     "DISCORD_HOME_CHANNEL", "TELEGRAM_HOME_CHANNEL",
+    "NAPCAT_WS_URL", "NAPCAT_TOKEN", "NAPCAT_HOME_CHANNEL",
     "SIGNAL_ACCOUNT", "SIGNAL_HTTP_URL",
     "SIGNAL_ALLOWED_USERS", "SIGNAL_GROUP_ALLOWED_USERS",
     "DINGTALK_CLIENT_ID", "DINGTALK_CLIENT_SECRET",
@@ -621,6 +622,17 @@ DEFAULT_CONFIG = {
             "extra_body": {},
         },
     },
+
+    # Image generation backend.
+    # When base_url + model + api_key are set, image_generate uses the
+    # configured OpenAI-compatible images endpoint instead of FAL.
+    "image_generation": {
+        "provider": "",       # e.g. custom | ark
+        "model": "",          # e.g. doubao-seedream-5-0-260128
+        "base_url": "",       # OpenAI-compatible image generation base URL
+        "api_key": "",        # API key for the custom image backend
+        "timeout": 120,       # seconds
+    },
     
     "display": {
         "compact": False,
@@ -695,7 +707,7 @@ DEFAULT_CONFIG = {
     
     "stt": {
         "enabled": True,
-        "provider": "local",  # "local" (free, faster-whisper) | "groq" | "openai" (Whisper API) | "mistral" (Voxtral Transcribe)
+        "provider": "local",  # "local" (free, faster-whisper) | "groq" | "openai" (Whisper API) | "mistral" (Voxtral Transcribe) | "volcengine"
         "local": {
             "model": "base",  # tiny, base, small, medium, large-v3
             "language": "",  # auto-detect by default; set to "en", "es", "fr", etc. to force
@@ -705,6 +717,15 @@ DEFAULT_CONFIG = {
         },
         "mistral": {
             "model": "voxtral-mini-latest",  # voxtral-mini-latest, voxtral-mini-2602
+        },
+        "volcengine": {
+            "model": "bigmodel",
+            "resource_id": "volc.bigasr.auc_turbo",
+            "language": "",
+            "base_url": "https://openspeech.bytedance.com/api/v3/auc/bigmodel/recognize/flash",
+            "api_key": "",
+            "app_key": "",
+            "access_key": "",
         },
     },
 
@@ -993,6 +1014,17 @@ DEFAULT_CONFIG = {
         # the sweep on every CLI invocation).  Tracked via state_meta in
         # state.db itself, so it's shared across all processes.
         "min_interval_hours": 24,
+    },
+    "napcat_observability": {
+        "enabled": False,
+        "bind_host": "127.0.0.1",
+        "port": 9120,
+        "retention_days": 30,
+        "queue_size": 10000,
+        "max_stdout_chars": 8000,
+        "max_stderr_chars": 4000,
+        "allow_control_actions": False,
+        "access_token": "",
     },
 
     # Config schema version - bump this when adding new required fields
@@ -1530,6 +1562,27 @@ OPTIONAL_ENV_VARS = {
         "password": True,
         "category": "tool",
     },
+    "VOLCENGINE_STT_API_KEY": {
+        "description": "Volcengine STT API key for Doubao speech recognition (new console auth)",
+        "prompt": "Volcengine STT API key",
+        "url": "https://console.volcengine.com/speech/service/",
+        "password": True,
+        "category": "tool",
+    },
+    "VOLCENGINE_STT_APP_KEY": {
+        "description": "Volcengine STT app key for Doubao speech recognition (legacy auth)",
+        "prompt": "Volcengine STT app key",
+        "url": "https://console.volcengine.com/speech/service/",
+        "password": True,
+        "category": "tool",
+    },
+    "VOLCENGINE_STT_ACCESS_KEY": {
+        "description": "Volcengine STT access key for Doubao speech recognition (legacy auth)",
+        "prompt": "Volcengine STT access key",
+        "url": "https://console.volcengine.com/speech/service/",
+        "password": True,
+        "category": "tool",
+    },
     "GITHUB_TOKEN": {
         "description": "GitHub token for Skills Hub (higher API rate limits, skill publish)",
         "prompt": "GitHub Token",
@@ -1594,6 +1647,21 @@ OPTIONAL_ENV_VARS = {
         "url": None,
         "password": False,
         "category": "messaging",
+    },
+    "NAPCAT_ALLOWED_USERS": {
+        "description": "Comma-separated QQ user IDs allowed to use the bot via NapCat",
+        "prompt": "Allowed NapCat QQ user IDs (comma-separated)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+    },
+    "NAPCAT_ALLOW_ALL_USERS": {
+        "description": "Allow all NapCat / QQ users to use the bot (true/false). Default: false.",
+        "prompt": "Allow all NapCat users (true/false)",
+        "url": None,
+        "password": False,
+        "category": "messaging",
+        "advanced": True,
     },
     "SLACK_BOT_TOKEN": {
         "description": "Slack bot token (xoxb-). Get from OAuth & Permissions after installing your app. "
@@ -2227,7 +2295,7 @@ _KNOWN_ROOT_KEYS = {
     "_config_version", "model", "providers", "fallback_model",
     "fallback_providers", "credential_pool_strategies", "toolsets",
     "agent", "terminal", "display", "compression", "delegation",
-    "auxiliary", "custom_providers", "context", "memory", "gateway",
+    "auxiliary", "image_generation", "custom_providers", "context", "memory", "gateway",
     "sessions",
 }
 

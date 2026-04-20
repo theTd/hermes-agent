@@ -6341,15 +6341,11 @@ class HermesCLI:
                             self._app.invalidate()
 
                 bg_agent.thinking_callback = _bg_thinking
-
                 result = bg_agent.run_conversation(
                     user_message=prompt,
                     task_id=task_id,
                 )
-
                 response = result.get("final_response", "") if result else ""
-                if not response and result and result.get("error"):
-                    response = f"Error: {result['error']}"
 
                 # Display result in the CLI (thread-safe via patch_stdout).
                 # Force a TUI refresh first so spinner/status bar don't overlap
@@ -6480,10 +6476,7 @@ class HermesCLI:
                     conversation_history=history_snapshot,
                     task_id=task_id,
                 )
-
-                response = (result.get("final_response") or "") if result else ""
-                if not response and result and result.get("error"):
-                    response = f"Error: {result['error']}"
+                response = result.get("final_response", "") if result else ""
 
                 # TUI refresh before printing
                 if self._app:
@@ -8462,7 +8455,6 @@ class HermesCLI:
                     "[Voice input — respond concisely and conversationally, "
                     "2-3 sentences max. No code blocks or markdown.] "
                 )
-
             def run_agent():
                 nonlocal result
                 # Set callbacks inside the agent thread so thread-local storage
@@ -9107,6 +9099,11 @@ class HermesCLI:
         # Give plugin manager a CLI reference so plugins can inject messages
         from hermes_cli.plugins import get_plugin_manager
         get_plugin_manager()._cli_ref = self
+
+        # Install napcat tool-event hooks (moved out of model_tools.py to avoid
+        # upstream merge conflicts in the hook insertion zone).
+        from agent.tool_event_instrumentation import install_tool_event_hooks
+        install_tool_event_hooks()
 
         # Config file watcher — detect mcp_servers changes and auto-reload
         from hermes_cli.config import get_config_path as _get_config_path

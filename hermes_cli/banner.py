@@ -12,6 +12,12 @@ import time
 from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, List, Optional
+from hermes_cli.update_source import (
+    STANDALONE_UPDATE_BRANCH,
+    fetch_standalone_update_ref,
+    standalone_update_label,
+    standalone_update_ref,
+)
 
 from rich.console import Console
 from rich.panel import Panel
@@ -124,11 +130,11 @@ _UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
 
 
 def check_for_updates() -> Optional[int]:
-    """Check how many commits behind origin/main the local repo is.
+    """Check how many commits behind the standalone napcat branch the local repo is.
 
-    Does a ``git fetch`` at most once every 6 hours (cached to
-    ``~/.hermes/.update_check``).  Returns the number of commits behind,
-    or ``None`` if the check fails or isn't applicable.
+    Fetches the standalone release branch at most once every 6 hours (cached to
+    ``~/.hermes/.update_check``). Returns the number of commits behind, or
+    ``None`` if the check fails or isn't applicable.
     """
     hermes_home = get_hermes_home()
     repo_dir = hermes_home / "hermes-agent"
@@ -151,11 +157,14 @@ def check_for_updates() -> Optional[int]:
         pass
 
     # Fetch latest refs (fast — only downloads ref metadata, no files)
+    standalone_ref = standalone_update_ref(STANDALONE_UPDATE_BRANCH)
     try:
-        subprocess.run(
-            ["git", "fetch", "origin", "--quiet"],
-            capture_output=True, timeout=10,
-            cwd=str(repo_dir),
+        fetch_standalone_update_ref(
+            ["git"],
+            repo_dir,
+            STANDALONE_UPDATE_BRANCH,
+            quiet=True,
+            timeout=10,
         )
     except Exception:
         pass  # Offline or timeout — use stale refs, that's fine
@@ -163,7 +172,7 @@ def check_for_updates() -> Optional[int]:
     # Count commits behind
     try:
         result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
+            ["git", "rev-list", "--count", f"HEAD..{standalone_ref}"],
             capture_output=True, text=True, timeout=5,
             cwd=str(repo_dir),
         )
@@ -211,20 +220,32 @@ def _git_short_hash(repo_dir: Path, rev: str) -> Optional[str]:
 
 
 def get_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
-    """Return upstream/local git hashes for the startup banner."""
+    """Return standalone/local git hashes for the startup banner."""
     repo_dir = repo_dir or _resolve_repo_dir()
     if repo_dir is None:
         return None
 
-    upstream = _git_short_hash(repo_dir, "origin/main")
+    standalone_ref = standalone_update_ref(STANDALONE_UPDATE_BRANCH)
+    try:
+        fetch_standalone_update_ref(
+            ["git"],
+            repo_dir,
+            STANDALONE_UPDATE_BRANCH,
+            quiet=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+    standalone = _git_short_hash(repo_dir, standalone_ref)
     local = _git_short_hash(repo_dir, "HEAD")
-    if not upstream or not local:
+    if not standalone or not local:
         return None
 
     ahead = 0
     try:
         result = subprocess.run(
-            ["git", "rev-list", "--count", "origin/main..HEAD"],
+            ["git", "rev-list", "--count", f"{standalone_ref}..HEAD"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -235,7 +256,7 @@ def get_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
     except Exception:
         ahead = 0
 
-    return {"upstream": upstream, "local": local, "ahead": max(ahead, 0)}
+    return {"standalone": standalone, "local": local, "ahead": max(ahead, 0)}
 
 
 _RELEASE_URL_BASE = "https://github.com/NousResearch/hermes-agent/releases/tag"
@@ -291,15 +312,16 @@ def format_banner_version_label() -> str:
     if not state:
         return base
 
-    upstream = state["upstream"]
+    standalone = state["standalone"]
     local = state["local"]
     ahead = int(state.get("ahead") or 0)
+    label = standalone_update_label()
 
-    if ahead <= 0 or upstream == local:
-        return f"{base} · upstream {upstream}"
+    if ahead <= 0 or standalone == local:
+        return f"{base} · standalone {label} {standalone}"
 
     carried_word = "commit" if ahead == 1 else "commits"
-    return f"{base} · upstream {upstream} · local {local} (+{ahead} carried {carried_word})"
+    return f"{base} · standalone {label} {standalone} · local {local} (+{ahead} carried {carried_word})"
 
 
 # =========================================================================

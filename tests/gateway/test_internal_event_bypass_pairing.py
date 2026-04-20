@@ -378,6 +378,12 @@ async def test_non_internal_event_without_user_triggers_pairing(monkeypatch, tmp
     runner = GatewayRunner(GatewayConfig())
     adapter = SimpleNamespace(send=AsyncMock())
     runner.adapters[Platform.DISCORD] = adapter
+    runner.pairing_store = SimpleNamespace(
+        is_approved=lambda platform_name, user_id: False,
+        _is_rate_limited=lambda platform_name, user_id: False,
+        generate_code=lambda platform_name, user_id, user_name: "PAIR123",
+        _record_rate_limit=lambda platform_name, user_id: None,
+    )
 
     source = SessionSource(
         platform=Platform.DISCORD,

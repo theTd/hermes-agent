@@ -10,6 +10,7 @@ from gateway.config import (
     PlatformConfig,
     SessionResetPolicy,
     _apply_env_overrides,
+    get_gateway_orchestrator_config,
     load_gateway_config,
 )
 
@@ -194,6 +195,27 @@ class TestGatewayConfigRoundtrip:
         restored = GatewayConfig.from_dict({"always_log_local": "false"})
         assert restored.always_log_local is False
 
+    def test_gateway_orchestrator_helper_prefers_platform_override_when_requested(self):
+        config = GatewayConfig(
+            gateway_orchestrator={"orchestrator_model": "top-level"},
+            platforms={
+                Platform.NAPCAT: PlatformConfig(
+                    enabled=True,
+                    extra={
+                        "orchestrator": {
+                            "orchestrator_model": "platform-wins",
+                        }
+                    },
+                )
+            },
+        )
+
+        generic = get_gateway_orchestrator_config(config)
+        platform_specific = get_gateway_orchestrator_config(config, platform=Platform.NAPCAT)
+
+        assert generic.orchestrator_model == "top-level"
+        assert platform_specific.orchestrator_model == "platform-wins"
+
 
 class TestLoadGatewayConfig:
     def test_bridges_quick_commands_from_config_yaml(self, tmp_path, monkeypatch):
@@ -213,6 +235,90 @@ class TestLoadGatewayConfig:
         config = load_gateway_config()
 
         assert config.quick_commands == {"limits": {"type": "exec", "command": "echo ok"}}
+
+    def test_bridges_gateway_orchestrator_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "platforms:\n"
+            "  napcat:\n"
+            "    extra:\n"
+            "      orchestrator:\n"
+            "        enabled_platforms: [napcat]\n"
+            "        orchestrator_model: doubao-seed-2-0-mini-260215\n"
+            "        orchestrator_provider: custom\n"
+            "        orchestrator_base_url: https://ark.cn-beijing.volces.com/api/v3\n"
+            "        orchestrator_api_key: ${VOLCENGINE_API_KEY}\n"
+            "        orchestrator_reasoning_effort: low\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("VOLCENGINE_API_KEY", "volcengine-test-key")
+
+        config = load_gateway_config()
+
+        assert config.gateway_orchestrator.enabled_platforms == []
+        assert config.gateway_orchestrator.orchestrator_model == ""
+        assert config.gateway_orchestrator.orchestrator_provider == ""
+        assert config.gateway_orchestrator.orchestrator_base_url == ""
+        assert config.gateway_orchestrator.orchestrator_api_key == ""
+        assert config.gateway_orchestrator.orchestrator_reasoning_effort == ""
+        assert config.gateway_orchestrator.orchestrator_context_length == 0
+        assert config.gateway_orchestrator.routing_history_max_entries == 0
+        assert config.gateway_orchestrator.routing_stable_prefix_messages == 8
+        assert config.platforms[Platform.NAPCAT].extra["orchestrator"]["enabled_platforms"] == ["napcat"]
+        assert config.platforms[Platform.NAPCAT].extra["orchestrator"]["orchestrator_api_key"] == "volcengine-test-key"
+        assert config.platforms[Platform.NAPCAT].extra["orchestrator"]["orchestrator_context_length"] == 32000
+
+    def test_platform_napcat_orchestrator_overrides_top_level_gateway_orchestrator(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "gateway_orchestrator:\n"
+            "  orchestrator_model: should-not-win\n"
+            "platforms:\n"
+            "  napcat:\n"
+            "    extra:\n"
+            "      orchestrator:\n"
+            "        orchestrator_model: platform-wins\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.gateway_orchestrator.orchestrator_model == "should-not-win"
+        assert config.platforms[Platform.NAPCAT].extra["orchestrator"]["orchestrator_model"] == "platform-wins"
+
+    def test_napcat_platform_defaults_keep_default_enablement_when_top_level_omits_platforms(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "platforms:\n"
+            "  napcat:\n"
+            "    extra: {}\n"
+            "gateway_orchestrator:\n"
+            "  orchestrator_model: inherited-model\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.gateway_orchestrator.enabled_platforms == []
+        assert config.platforms[Platform.NAPCAT].extra["orchestrator"]["enabled_platforms"] == ["napcat"]
+        assert config.platforms[Platform.NAPCAT].extra["orchestrator"]["orchestrator_model"] == "inherited-model"
+        assert config.platforms[Platform.NAPCAT].extra["orchestrator"]["orchestrator_context_length"] == 32000
 
     def test_bridges_group_sessions_per_user_from_config_yaml(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / ".hermes"
@@ -391,6 +497,7 @@ class TestLoadGatewayConfig:
         assert config.platforms[Platform.WHATSAPP].extra["unauthorized_dm_behavior"] == "pair"
 
     def test_bridges_telegram_disable_link_previews_from_config_yaml(self, tmp_path, monkeypatch):
+
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -407,6 +514,7 @@ class TestLoadGatewayConfig:
         assert config.platforms[Platform.TELEGRAM].extra["disable_link_previews"] is True
 
     def test_bridges_telegram_proxy_url_from_config_yaml(self, tmp_path, monkeypatch):
+
         hermes_home = tmp_path / ".hermes"
         hermes_home.mkdir()
         config_path = hermes_home / "config.yaml"
@@ -441,6 +549,68 @@ class TestLoadGatewayConfig:
 
         import os
         assert os.environ.get("TELEGRAM_PROXY") == "socks5://from-env:1080"
+
+    def test_expands_env_vars_inside_platform_extra(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "platforms:\n"
+            "  napcat:\n"
+            "    enabled: true\n"
+            "    token: tok\n"
+            "    extra:\n"
+            "      ws_url: ws://127.0.0.1:3001/\n"
+            "      model_promotion:\n"
+            "        enabled: true\n"
+            "        l1:\n"
+            "          model: MiniMax-M2.7-highspeed\n"
+            "          provider: minimax-cn\n"
+            "          api_key: ${MINIMAX_CN_API_KEY}\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("MINIMAX_CN_API_KEY", "test-mmcn-key")
+
+        config = load_gateway_config()
+
+        assert config.platforms[Platform.NAPCAT].extra["model_promotion"]["l1"]["api_key"] == "test-mmcn-key"
+
+    def test_bridges_napcat_observability_from_config_yaml(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "napcat_observability:\n"
+            "  enabled: true\n"
+            "  bind_host: 10.0.1.10\n"
+            "  port: 9120\n"
+            "  retention_days: 30\n"
+            "  access_token: secret\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        # Round-trips into the dataclass so the new from_runner_config()
+        # path (which reads runner.config.to_dict()) actually finds the
+        # block and starts the sidecar instead of silently skipping it.
+        assert config.napcat_observability["enabled"] is True
+        assert config.napcat_observability["bind_host"] == "10.0.1.10"
+        assert config.napcat_observability["access_token"] == "secret"
+
+        round_tripped = config.to_dict()
+        assert round_tripped["napcat_observability"]["enabled"] is True
+
+        from gateway.napcat_observability.runtime_service import (
+            NapcatObservabilityRuntimeService,
+        )
+
+        service = NapcatObservabilityRuntimeService.from_runner_config(round_tripped)
+        assert service.enabled is True
 
 
 class TestHomeChannelEnvOverrides:

@@ -625,6 +625,11 @@ def handle_function_call(
 
     except Exception as e:
         error_msg = f"Error executing {function_name}: {str(e)}"
+        try:
+            from agent.tool_event_instrumentation import pop_and_emit_failure
+            pop_and_emit_failure(tool_call_id or "", e)
+        except Exception:
+            pass
         logger.error(error_msg)
         return json.dumps({"error": error_msg}, ensure_ascii=False)
 

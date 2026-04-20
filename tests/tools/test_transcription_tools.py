@@ -49,6 +49,9 @@ def clean_env(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.delenv("VOLCENGINE_STT_API_KEY", raising=False)
+    monkeypatch.delenv("VOLCENGINE_STT_APP_KEY", raising=False)
+    monkeypatch.delenv("VOLCENGINE_STT_ACCESS_KEY", raising=False)
     monkeypatch.delenv("HERMES_LOCAL_STT_COMMAND", raising=False)
     monkeypatch.delenv("HERMES_LOCAL_STT_LANGUAGE", raising=False)
 
@@ -1054,6 +1057,145 @@ class TestGetProviderMistral:
 
 
 # ============================================================================
+# _get_provider / transcribe_audio — Volcengine
+# ============================================================================
+
+class TestGetProviderVolcengine:
+    def test_volcengine_with_config_env_placeholder(self, monkeypatch):
+        monkeypatch.setenv("VOLCENGINE_STT_API_KEY", "ve-test")
+        from tools.transcription_tools import _get_provider
+        assert _get_provider({"provider": "volcengine", "volcengine": {"api_key": "${VOLCENGINE_STT_API_KEY}"}}) == "volcengine"
+
+    def test_volcengine_with_api_key(self, monkeypatch):
+        monkeypatch.setenv("VOLCENGINE_STT_API_KEY", "ve-test")
+        from tools.transcription_tools import _get_provider
+        assert _get_provider({"provider": "volcengine"}) == "volcengine"
+
+    def test_volcengine_with_legacy_pair(self, monkeypatch):
+        monkeypatch.setenv("VOLCENGINE_STT_APP_KEY", "app")
+        monkeypatch.setenv("VOLCENGINE_STT_ACCESS_KEY", "token")
+        from tools.transcription_tools import _get_provider
+        assert _get_provider({"provider": "volcengine"}) == "volcengine"
+
+    def test_volcengine_explicit_no_key_returns_none(self):
+        from tools.transcription_tools import _get_provider
+        assert _get_provider({"provider": "volcengine"}) == "none"
+
+
+class TestTranscribeVolcengine:
+    def test_config_env_placeholder_uses_hermes_env_file(self, monkeypatch, sample_wav):
+        response = MagicMock()
+        response.headers = {"X-Api-Status-Code": "20000000"}
+        response.json.return_value = {"result": {"text": "dotenv works"}}
+        response.raise_for_status.return_value = None
+
+        config = {
+            "volcengine": {
+                "api_key": "${VOLCENGINE_STT_API_KEY}",
+            }
+        }
+
+        with patch("tools.transcription_tools._load_stt_config", return_value=config), \
+             patch("hermes_cli.config.get_env_value", return_value="ve-from-dotenv"), \
+             patch("httpx.post", return_value=response) as mock_post:
+            from tools.transcription_tools import _transcribe_volcengine
+            result = _transcribe_volcengine(sample_wav, "bigmodel")
+
+        assert result["success"] is True
+        assert mock_post.call_args.kwargs["headers"]["X-Api-Key"] == "ve-from-dotenv"
+
+    def test_config_env_placeholder_expands(self, monkeypatch, sample_wav):
+        monkeypatch.setenv("VOLCENGINE_STT_API_KEY", "ve-test")
+
+        response = MagicMock()
+        response.headers = {"X-Api-Status-Code": "20000000"}
+        response.json.return_value = {"result": {"text": "placeholder works"}}
+        response.raise_for_status.return_value = None
+
+        config = {
+            "volcengine": {
+                "api_key": "${VOLCENGINE_STT_API_KEY}",
+            }
+        }
+
+        with patch("tools.transcription_tools._load_stt_config", return_value=config), \
+             patch("httpx.post", return_value=response) as mock_post:
+            from tools.transcription_tools import _transcribe_volcengine
+            result = _transcribe_volcengine(sample_wav, "bigmodel")
+
+        assert result["success"] is True
+        assert mock_post.call_args.kwargs["headers"]["X-Api-Key"] == "ve-test"
+
+    def test_no_credentials(self):
+        from tools.transcription_tools import _transcribe_volcengine
+        result = _transcribe_volcengine("/tmp/test.ogg", "bigmodel")
+        assert result["success"] is False
+        assert "VOLCENGINE_STT_API_KEY" in result["error"]
+
+    def test_successful_transcription_with_api_key(self, monkeypatch, sample_wav):
+        monkeypatch.setenv("VOLCENGINE_STT_API_KEY", "ve-test")
+
+        response = MagicMock()
+        response.headers = {
+            "X-Api-Status-Code": "20000000",
+            "X-Api-Message": "OK",
+            "X-Tt-Logid": "log-1",
+        }
+        response.json.return_value = {"result": {"text": "hello from volcengine"}}
+        response.raise_for_status.return_value = None
+
+        with patch("httpx.post", return_value=response) as mock_post:
+            from tools.transcription_tools import _transcribe_volcengine
+            result = _transcribe_volcengine(sample_wav, "bigmodel")
+
+        assert result["success"] is True
+        assert result["transcript"] == "hello from volcengine"
+        assert result["provider"] == "volcengine"
+        assert mock_post.call_args.kwargs["headers"]["X-Api-Key"] == "ve-test"
+        assert mock_post.call_args.kwargs["json"]["request"]["model_name"] == "bigmodel"
+
+    def test_successful_transcription_with_legacy_headers(self, monkeypatch, sample_ogg):
+        monkeypatch.setenv("VOLCENGINE_STT_APP_KEY", "app")
+        monkeypatch.setenv("VOLCENGINE_STT_ACCESS_KEY", "token")
+
+        response = MagicMock()
+        response.headers = {"X-Api-Status-Code": "20000000"}
+        response.json.return_value = {"result": {"text": "legacy auth works"}}
+        response.raise_for_status.return_value = None
+
+        with patch("httpx.post", return_value=response) as mock_post:
+            from tools.transcription_tools import _transcribe_volcengine
+            result = _transcribe_volcengine(sample_ogg, "bigmodel")
+
+        assert result["success"] is True
+        headers = mock_post.call_args.kwargs["headers"]
+        assert headers["X-Api-App-Key"] == "app"
+        assert headers["X-Api-Access-Key"] == "token"
+        assert mock_post.call_args.kwargs["json"]["audio"]["format"] == "ogg"
+        assert mock_post.call_args.kwargs["json"]["audio"]["codec"] == "opus"
+
+    def test_api_status_error_returns_failure(self, monkeypatch, sample_wav):
+        monkeypatch.setenv("VOLCENGINE_STT_API_KEY", "ve-test")
+
+        response = MagicMock()
+        response.headers = {
+            "X-Api-Status-Code": "55000031",
+            "X-Api-Message": "Busy",
+            "X-Tt-Logid": "log-busy",
+        }
+        response.json.return_value = {}
+        response.raise_for_status.return_value = None
+
+        with patch("httpx.post", return_value=response):
+            from tools.transcription_tools import _transcribe_volcengine
+            result = _transcribe_volcengine(sample_wav, "bigmodel")
+
+        assert result["success"] is False
+        assert "55000031" in result["error"]
+        assert "log-busy" in result["error"]
+
+
+# ============================================================================
 # transcribe_audio — Mistral dispatch
 # ============================================================================
 
@@ -1323,6 +1465,12 @@ class TestTranscribeAudioXAIDispatch:
              patch("tools.transcription_tools._get_provider", return_value="xai"), \
              patch("tools.transcription_tools._transcribe_xai",
                    return_value={"success": True, "transcript": "hi", "provider": "xai"}) as mock_xai:
+class TestTranscribeAudioVolcengineDispatch:
+    def test_dispatches_to_volcengine(self, sample_ogg):
+        with patch("tools.transcription_tools._load_stt_config", return_value={"provider": "volcengine"}), \
+             patch("tools.transcription_tools._get_provider", return_value="volcengine"), \
+             patch("tools.transcription_tools._transcribe_volcengine",
+                   return_value={"success": True, "transcript": "hi", "provider": "volcengine"}) as mock_volc:
             from tools.transcription_tools import transcribe_audio
             result = transcribe_audio(sample_ogg)
 
@@ -1349,3 +1497,16 @@ class TestTranscribeAudioXAIDispatch:
             transcribe_audio(sample_ogg, model="custom-stt")
 
         assert mock_xai.call_args[0][1] == "custom-stt"
+        assert result["provider"] == "volcengine"
+        mock_volc.assert_called_once()
+
+    def test_config_volcengine_model_used(self, sample_ogg):
+        config = {"provider": "volcengine", "volcengine": {"model": "bigmodel"}}
+        with patch("tools.transcription_tools._load_stt_config", return_value=config), \
+             patch("tools.transcription_tools._get_provider", return_value="volcengine"), \
+             patch("tools.transcription_tools._transcribe_volcengine",
+                   return_value={"success": True, "transcript": "hi"}) as mock_volc:
+            from tools.transcription_tools import transcribe_audio
+            transcribe_audio(sample_ogg, model=None)
+
+        assert mock_volc.call_args[0][1] == "bigmodel"

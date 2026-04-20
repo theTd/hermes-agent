@@ -5,7 +5,7 @@
 # Uses uv for fast Python provisioning and package management.
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/theTd/hermes-agent/napcat/scripts/install.ps1 | iex
 #
 # Or download and run with options:
 #   .\install.ps1 -NoVenv -SkipSetup
@@ -15,7 +15,7 @@
 param(
     [switch]$NoVenv,
     [switch]$SkipSetup,
-    [string]$Branch = "main",
+    [string]$Branch = "napcat",
     [string]$HermesHome = "$env:LOCALAPPDATA\hermes",
     [string]$InstallDir = "$env:LOCALAPPDATA\hermes\hermes-agent"
 )
@@ -26,8 +26,8 @@ $ErrorActionPreference = "Stop"
 # Configuration
 # ============================================================================
 
-$RepoUrlSsh = "git@github.com:NousResearch/hermes-agent.git"
-$RepoUrlHttps = "https://github.com/NousResearch/hermes-agent.git"
+$RepoUrlSsh = "git@github.com:theTd/hermes-agent.git"
+$RepoUrlHttps = "https://github.com/theTd/hermes-agent.git"
 $PythonVersion = "3.11"
 $NodeVersion = "22"
 
@@ -416,10 +416,74 @@ function Install-Repository {
         if (Test-Path "$InstallDir\.git") {
             Write-Info "Existing installation found, updating..."
             Push-Location $InstallDir
-            git -c windows.appendAtomically=false fetch origin
-            git -c windows.appendAtomically=false checkout $Branch
-            git -c windows.appendAtomically=false pull origin $Branch
-            Pop-Location
+            $autoStashRef = $null
+            try {
+                $statusOutput = git -c windows.appendAtomically=false status --porcelain
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to inspect git status"
+                }
+
+                if ($statusOutput) {
+                    $stashName = "hermes-install-autostash-$(Get-Date -AsUTC -Format 'yyyyMMdd-HHmmss')"
+                    Write-Info "Local changes detected, stashing before update..."
+                    git -c windows.appendAtomically=false stash push --include-untracked -m $stashName | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to stash local changes"
+                    }
+
+                    $autoStashRef = (git -c windows.appendAtomically=false rev-parse --verify refs/stash).Trim()
+                    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($autoStashRef)) {
+                        throw "Failed to resolve stash reference"
+                    }
+                }
+
+                git -c windows.appendAtomically=false fetch origin
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to fetch origin"
+                }
+                git -c windows.appendAtomically=false checkout $Branch
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to checkout $Branch"
+                }
+                git -c windows.appendAtomically=false reset --hard "origin/$Branch"
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to reset to origin/$Branch"
+                }
+
+                if ($autoStashRef) {
+                    $restoreNow = $true
+                    if (-not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
+                        Write-Host ""
+                        Write-Warn "Local changes were stashed before updating."
+                        Write-Warn "Restoring them may reapply local customizations onto the updated codebase."
+                        $response = Read-Host "Restore local changes now? [Y/n]"
+                        if ($response -and $response -notmatch '^(?i:y|yes)$') {
+                            $restoreNow = $false
+                        }
+                    }
+
+                    if ($restoreNow) {
+                        Write-Info "Restoring local changes..."
+                        git -c windows.appendAtomically=false stash apply $autoStashRef
+                        if ($LASTEXITCODE -eq 0) {
+                            $stashSelector = git -c windows.appendAtomically=false stash list '--format=%gd %H' | Where-Object { $_ -like "* $autoStashRef" } | Select-Object -First 1
+                            if ($stashSelector) {
+                                $stashEntry = ($stashSelector -split ' ')[0]
+                                git -c windows.appendAtomically=false stash drop $stashEntry | Out-Null
+                            }
+                            Write-Warn "Local changes were restored on top of the updated codebase."
+                            Write-Warn "Review git diff / git status if Hermes behaves unexpectedly."
+                        } else {
+                            Write-Warn "Restoring local changes hit conflicts. Your stash is preserved."
+                            Write-Info "  Reapply manually with: git stash apply $autoStashRef"
+                        }
+                    } else {
+                        Write-Info "Leaving local changes in stash: $autoStashRef"
+                    }
+                }
+            } finally {
+                Pop-Location
+            }
         } else {
             Write-Err "Directory exists but is not a git repository: $InstallDir"
             Write-Info "Remove it or choose a different directory with -InstallDir"
@@ -461,7 +525,7 @@ function Install-Repository {
             if (Test-Path $InstallDir) { Remove-Item -Recurse -Force $InstallDir -ErrorAction SilentlyContinue }
             Write-Warn "Git clone failed — downloading ZIP archive instead..."
             try {
-                $zipUrl = "https://github.com/NousResearch/hermes-agent/archive/refs/heads/$Branch.zip"
+                $zipUrl = "https://github.com/theTd/hermes-agent/archive/refs/heads/$Branch.zip"
                 $zipPath = "$env:TEMP\hermes-agent-$Branch.zip"
                 $extractPath = "$env:TEMP\hermes-agent-extract"
                 
@@ -915,7 +979,7 @@ try {
     Write-Err "Installation failed: $_"
     Write-Host ""
     Write-Info "If the error is unclear, try downloading and running the script directly:"
-    Write-Host "  Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
+    Write-Host "  Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/theTd/hermes-agent/napcat/scripts/install.ps1' -OutFile install.ps1" -ForegroundColor Yellow
     Write-Host "  .\install.ps1" -ForegroundColor Yellow
     Write-Host ""
 }

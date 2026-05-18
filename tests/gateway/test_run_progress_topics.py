@@ -2,14 +2,17 @@
 
 import asyncio
 import importlib
+import logging
 import sys
 import time
 import types
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig, StreamingConfig
+from gateway.config import GatewayOrchestratorConfig, Platform, PlatformConfig, StreamingConfig
+from gateway.agent_run_hooks import GatewayAgentRunHooks
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
 from gateway.session import SessionSource
 
@@ -121,6 +124,10 @@ class NonEditingProgressCaptureAdapter(ProgressCaptureAdapter):
         raise AssertionError("non-editable adapters should not receive edit_message calls")
 
 
+# Alias used by napcat-specific tests — kept here so split test files can import it.
+NoEditProgressCaptureAdapter = NonEditingProgressCaptureAdapter
+
+
 class FakeAgent:
     def __init__(self, **kwargs):
         # Capture anything passed via kwargs (older code path) but don't
@@ -146,7 +153,7 @@ class FakeAgent:
 
 class LongPreviewAgent:
     """Agent that emits a tool call with a very long preview string."""
-    LONG_CMD = "cd /home/teknium/.hermes/hermes-agent/.worktrees/hermes-d8860339 && source .venv/bin/activate && python -m pytest tests/gateway/test_run_progress_topics.py -n0 -q"
+    LONG_CMD = "cd /home/testuser/.hermes/hermes-agent/.worktrees/hermes-d8860339 && source .venv/bin/activate && python -m pytest tests/gateway/test_run_progress_topics.py -n0 -q"
 
     def __init__(self, **kwargs):
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
@@ -160,7 +167,6 @@ class LongPreviewAgent:
             "messages": [],
             "api_calls": 1,
         }
-
 
 class DelayedProgressAgent:
     def __init__(self, **kwargs):
@@ -204,6 +210,43 @@ class ManyProgressLinesAgent:
         }
 
 
+class PromptCaptureAgent:
+    def __init__(self, **kwargs):
+        self.tools = []
+        self.context_compressor = SimpleNamespace(last_prompt_tokens=0)
+        self.session_prompt_tokens = 0
+        self.session_completion_tokens = 0
+        self.reasoning_callback = None
+        self.stream_delta_callback = None
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class InterruptThenReplyAgent:
+    calls = 0
+
+    def __init__(self, **kwargs):
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        InterruptThenReplyAgent.calls += 1
+        if InterruptThenReplyAgent.calls == 1:
+            return {
+                "final_response": "",
+                "messages": [],
+                "api_calls": 1,
+                "interrupted": True,
+            }
+        return {
+            "final_response": f"handled: {message}",
+            "messages": [],
+            "api_calls": 1,
+        }
 class DelayedInterimAgent:
     def __init__(self, **kwargs):
         self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
@@ -216,6 +259,29 @@ class DelayedInterimAgent:
         time.sleep(0.1)
         return {
             "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class LiveObservabilityAgent:
+    def __init__(self, **kwargs):
+        self.tools = []
+        self.context_compressor = SimpleNamespace(last_prompt_tokens=0)
+        self.session_prompt_tokens = 0
+        self.session_completion_tokens = 0
+        self.reasoning_callback = None
+        self.stream_delta_callback = None
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.reasoning_callback:
+            self.reasoning_callback("step 1")
+            self.reasoning_callback("\nstep 2")
+        if self.stream_delta_callback:
+            self.stream_delta_callback("hello ")
+            self.stream_delta_callback("world")
+        return {
+            "final_response": "hello world",
             "messages": [],
             "api_calls": 1,
         }
@@ -241,6 +307,8 @@ def _make_runner(adapter):
         thread_sessions_per_user=False,
         group_sessions_per_user=False,
         stt_enabled=False,
+        platforms={},
+        gateway_orchestrator=GatewayOrchestratorConfig(enabled_platforms=[]),
     )
     return runner
 
@@ -466,11 +534,6 @@ async def test_run_agent_feishu_progress_replies_inside_existing_thread(monkeypa
     assert adapter.edits[0]["message_id"] == "progress-1"
 
 
-# ---------------------------------------------------------------------------
-# Preview truncation tests (all/new mode respects tool_preview_length)
-# ---------------------------------------------------------------------------
-
-
 def _run_long_preview_helper(monkeypatch, tmp_path, preview_length=0):
     """Shared setup for long-preview truncation tests.
 
@@ -585,6 +648,57 @@ class CommentaryAgent:
         }
 
 
+class PromotionCommentaryAgent:
+    def __init__(self, **kwargs):
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback("[[COMPLEXITY:5]]\n\n查一下上海现在的天气~", already_streamed=False)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class AttachmentPlaceholderCommentaryAgent:
+    def __init__(self, **kwargs):
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback("[Sent image attachment]", already_streamed=False)
+        return {
+            "final_response": "done",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class StreamingProbeAgent:
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        if self.stream_delta_callback:
+            self.stream_delta_callback("partial ")
+            self.stream_delta_callback("reply")
+        return {
+            "final_response": "partial reply",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class FailIfConstructedAgent:
+    def __init__(self, **kwargs):
+        raise AssertionError("Agent should not be constructed for direct NapCat auth responses")
+
+
 class PreviewedResponseAgent:
     def __init__(self, **kwargs):
         self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
@@ -596,6 +710,31 @@ class PreviewedResponseAgent:
         return {
             "final_response": "You're welcome.",
             "response_previewed": True,
+            "messages": [],
+            "api_calls": 1,
+        }
+
+
+class ObservabilityOnlyCommentaryAgent:
+    last_track_streamed_flag = None
+
+    def __init__(self, **kwargs):
+        self.interim_assistant_callback = kwargs.get("interim_assistant_callback")
+        self.stream_delta_callback = kwargs.get("stream_delta_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        flag = getattr(self, "_track_streamed_assistant_text", True)
+        type(self).last_track_streamed_flag = flag
+        if self.stream_delta_callback:
+            self.stream_delta_callback("I'll inspect the repo first.")
+        if self.interim_assistant_callback:
+            self.interim_assistant_callback(
+                "I'll inspect the repo first.",
+                already_streamed=flag,
+            )
+        return {
+            "final_response": "done",
             "messages": [],
             "api_calls": 1,
         }
@@ -796,6 +935,35 @@ async def test_run_agent_surfaces_interim_commentary_by_default(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
+async def test_run_agent_sanitizes_complexity_interim_commentary_without_protocol(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        PromotionCommentaryAgent,
+        session_id="sess-commentary-complexity-sanitized",
+        config_data={"display": {"interim_assistant_messages": True}},
+    )
+
+    assert result.get("already_sent") is not True
+    assert any(call["content"] == "查一下上海现在的天气~" for call in adapter.sent)
+    assert all("[[COMPLEXITY:" not in call["content"] for call in adapter.sent)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_suppresses_attachment_placeholder_interim_commentary(monkeypatch, tmp_path):
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        AttachmentPlaceholderCommentaryAgent,
+        session_id="sess-commentary-attachment-placeholder",
+        config_data={"display": {"interim_assistant_messages": True}},
+    )
+
+    assert result.get("already_sent") is not True
+    assert not any(call["content"] == "[Sent image attachment]" for call in adapter.sent)
+
+
+@pytest.mark.asyncio
 async def test_run_agent_suppresses_interim_commentary_when_disabled(monkeypatch, tmp_path):
     adapter, result = await _run_with_agent(
         monkeypatch,
@@ -917,6 +1085,8 @@ async def test_run_agent_previewed_final_marks_already_sent(monkeypatch, tmp_pat
     assert result.get("already_sent") is True
     assert [call["content"] for call in adapter.sent] == ["You're welcome."]
 
+
+@pytest.mark.asyncio
 
 @pytest.mark.asyncio
 async def test_run_agent_matrix_streaming_omits_cursor(monkeypatch, tmp_path):

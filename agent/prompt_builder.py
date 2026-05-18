@@ -13,7 +13,7 @@ from collections import OrderedDict
 from pathlib import Path
 
 from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
-from typing import Optional
+from typing import Dict, Optional
 
 from agent.skill_utils import (
     extract_skill_conditions,
@@ -149,12 +149,29 @@ HERMES_AGENT_HELP_GUIDANCE = (
 
 MEMORY_GUIDANCE = (
     "You have persistent memory across sessions. Save durable facts using the memory "
-    "tool: user preferences, environment details, tool quirks, and stable conventions. "
+    "tool: user preferences, shared chat context, environment details, tool quirks, and stable conventions. "
     "Memory is injected into every turn, so keep it compact and focused on facts that "
     "will still matter later.\n"
+    "Be proactive: when the user tells you a stable fact you did not already know, "
+    "or gives/corrects a durable identity, name, location, preference, role, workflow, "
+    "or expectation, call the memory tool in the same turn before your final reply. "
+    "Do not merely say you will remember it. This includes ANY new knowledge the user "
+    "shares: device quirks, workarounds, operational tips, behavioral rules, or facts "
+    "that would prevent future mistakes. Examples: the user saying your name is X, "
+    "their name is X, they live/work somewhere, they want a specific default behavior, "
+    "or they teach you that '自动模式下调温度无效，必须先切换到制冷模式'.\n"
+    "When USER PROFILE or CHAT PROFILE blocks are present, treat them as active working "
+    "context: use them proactively, do not ask the user to restate facts already captured "
+    "there, and update them if you discover a stable fact is missing, outdated, or scoped "
+    "to the wrong target.\n"
+    "When the user corrects a remembered fact or you discover a stored fact is wrong, "
+    "update or delete the wrong entry with replace/remove instead of merely adding a "
+    "second contradictory entry.\n"
     "Prioritize what reduces future user steering — the most valuable memory is one "
     "that prevents the user from having to correct or remind you again. "
-    "User preferences and recurring corrections matter more than procedural task details.\n"
+    "User preferences and recurring corrections matter more than procedural task details. "
+    "Use target='user' for the current person's profile, target='chat' for shared facts "
+    "about the current group/channel/thread, and target='memory' for durable cross-chat notes.\n"
     "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
     "state to memory; use session_search to recall those from past transcripts. "
     "Specifically: do not record PR numbers, issue numbers, commit SHAs, 'fixed bug X', "
@@ -417,7 +434,9 @@ COMPUTER_USE_GUIDANCE = (
 # message representation stays consistent ("system" everywhere).
 DEVELOPER_ROLE_MODELS = ("gpt-5", "codex")
 
-PLATFORM_HINTS = {
+# Split into two dicts so upstream additions to the core set never conflict
+# with napcat-specific platform hints during rebase.
+_PLATFORM_HINTS_CORE: Dict[str, str] = {
     "whatsapp": (
         "You are on a text messaging communication platform, WhatsApp. "
         "Please do not use markdown as it does not render. "
@@ -597,6 +616,15 @@ PLATFORM_HINTS = {
         "Use MEDIA:/absolute/path instead."
     ),
 }
+
+# Napcat-specific platform hints — imported from the napcat platform module
+# so upstream additions to the core set never conflict with napcat hints.
+try:
+    from gateway.platforms.napcat import _NAPCAT_PLATFORM_HINTS as _PLATFORM_HINTS_NAPCAT
+except ImportError:
+    _PLATFORM_HINTS_NAPCAT: Dict[str, str] = {}
+
+PLATFORM_HINTS: Dict[str, str] = {**_PLATFORM_HINTS_CORE, **_PLATFORM_HINTS_NAPCAT}
 
 # ---------------------------------------------------------------------------
 # Environment hints — execution-environment awareness for the agent.

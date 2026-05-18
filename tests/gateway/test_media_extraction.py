@@ -10,6 +10,8 @@ times per reply. (Regression test for #160)
 import pytest
 import re
 
+from gateway.run import GatewayRunner
+
 
 def extract_media_tags_fixed(result_messages, history_len):
     """
@@ -178,6 +180,73 @@ class TestMediaExtraction:
         seen = set()
         unique = [t for t in tags if t not in seen and not seen.add(t)]
         assert len(unique) == 2  # After dedup: same.ogg and different.ogg
+
+    def test_structured_tool_result_image_path_promoted_to_media_tag(self):
+        """Structured tool JSON with a local image path should become MEDIA."""
+        messages = [
+            {
+                "role": "tool",
+                "tool_call_id": "img-1",
+                "content": '{"success": true, "image": "/tmp/generated-art.png", "source_url": "https://example.com/generated-art.png"}',
+            },
+        ]
+
+        tags, voice_directive = GatewayRunner._collect_tool_result_attachment_lines(
+            messages,
+            history_media_paths=set(),
+            final_response="Here is your image.",
+        )
+
+        assert tags == ["MEDIA:/tmp/generated-art.png"]
+        assert voice_directive is False
+
+    def test_structured_tool_result_skips_history_and_existing_response_path(self):
+        """Structured image paths should not be duplicated across turns."""
+        messages = [
+            {
+                "role": "tool",
+                "tool_call_id": "img-1",
+                "content": '{"success": true, "image": "/tmp/already-sent.png"}',
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "img-2",
+                "content": '{"success": true, "image": "/tmp/new-image.png"}',
+            },
+        ]
+
+        tags, _ = GatewayRunner._collect_tool_result_attachment_lines(
+            messages,
+            history_media_paths={"/tmp/already-sent.png"},
+            final_response="Rendered file: /tmp/new-image.png",
+        )
+
+        assert tags == []
+
+    def test_delegate_summary_media_in_json_extracts_real_path_only(self):
+        """delegate_task summaries should yield real MEDIA paths, not placeholders."""
+        messages = [
+            {
+                "role": "tool",
+                "tool_call_id": "delegate-1",
+                "content": (
+                    '{"results":[{"task_index":0,"status":"completed","summary":'
+                    '"来源：Pixiv\\n作者：示例\\n\\n'
+                    'MEDIA:/tmp/pixiv-soft-r15.jpg\\n'
+                    'MEDIA:<image_path>\\n\\n'
+                    'MEDIA:<绝对路径>`"}]}'
+                ),
+            },
+        ]
+
+        tags, voice_directive = GatewayRunner._collect_tool_result_attachment_lines(
+            messages,
+            history_media_paths=set(),
+            final_response="已处理。",
+        )
+
+        assert tags == ["MEDIA:/tmp/pixiv-soft-r15.jpg"]
+        assert voice_directive is False
 
 
 if __name__ == "__main__":

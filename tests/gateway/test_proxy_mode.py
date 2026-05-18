@@ -270,12 +270,12 @@ class TestRunAgentViaProxy:
         # Verify session ID header
         assert session.captured_headers["X-Hermes-Session-Id"] == "session-abc"
 
-        # Verify messages include system, history, and current message
+        # Verify system is top-level and messages carry only conversation turns
+        assert session.captured_json["system"] == "You are helpful."
         messages = session.captured_json["messages"]
-        assert messages[0] == {"role": "system", "content": "You are helpful."}
-        assert messages[1] == {"role": "user", "content": "Hello"}
-        assert messages[2] == {"role": "assistant", "content": "Hi there!"}
-        assert messages[3] == {"role": "user", "content": "How are you?"}
+        assert messages[0] == {"role": "user", "content": "Hello"}
+        assert messages[1] == {"role": "assistant", "content": "Hi there!"}
+        assert messages[2] == {"role": "user", "content": "How are you?"}
 
         # Verify streaming is requested
         assert session.captured_json["stream"] is True
@@ -445,6 +445,35 @@ class TestRunAgentViaProxy:
         assert result["api_calls"] == 0
 
     @pytest.mark.asyncio
+    async def test_turn_system_context_overrides_proxy_system_message(self, monkeypatch):
+        monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
+        monkeypatch.delenv("GATEWAY_PROXY_KEY", raising=False)
+        runner = _make_runner()
+        source = _make_source()
+
+        resp = _FakeSSEResponse(
+            status=200,
+            sse_chunks=[b'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'],
+        )
+        session = _FakeSession(resp)
+
+        with patch("gateway.run._load_gateway_config", return_value={}):
+            with _patch_aiohttp(session):
+                with patch("aiohttp.ClientTimeout"):
+                    await runner._run_agent_via_proxy(
+                        message="hi",
+                        context_prompt="base context",
+                        turn_system_context="base context\n\nchannel persona",
+                        history=[],
+                        source=source,
+                        session_id="sess-456",
+                    )
+
+        messages = session.captured_json["messages"]
+        assert session.captured_json["system"] == "base context\n\nchannel persona"
+        assert messages == [{"role": "user", "content": "hi"}]
+
+    @pytest.mark.asyncio
     async def test_no_auth_header_without_key(self, monkeypatch):
         monkeypatch.setenv("GATEWAY_PROXY_URL", "http://host:8642")
         monkeypatch.delenv("GATEWAY_PROXY_KEY", raising=False)
@@ -494,7 +523,8 @@ class TestRunAgentViaProxy:
                         session_id="test",
                     )
 
-        # No system message should appear when context_prompt is empty
+        # No system prompt should appear when context_prompt is empty
+        assert session.captured_json["system"] == ""
         messages = session.captured_json["messages"]
         assert len(messages) == 1
         assert messages[0]["role"] == "user"

@@ -890,6 +890,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # same fallback behaviour as Telegram/Discord/Slack (fixes #4954).
         fallback_model = GatewayRunner._load_fallback_model()
 
+        from agent.runtime_context import AgentRuntimeContext
         agent = AIAgent(
             model=model,
             **runtime_kwargs,
@@ -907,7 +908,7 @@ class APIServerAdapter(BasePlatformAdapter):
             session_db=self._ensure_session_db(),
             fallback_model=fallback_model,
             reasoning_config=reasoning_config,
-            gateway_session_key=gateway_session_key,
+            runtime_context=AgentRuntimeContext(gateway_session_key=gateway_session_key),
         )
         return agent
 
@@ -1041,8 +1042,8 @@ class APIServerAdapter(BasePlatformAdapter):
 
         stream = _coerce_request_bool(body.get("stream"), default=False)
 
-        # Extract system message (becomes ephemeral system prompt layered ON TOP of core)
-        system_prompt = None
+        # Extract system prompt from the top-level field only.
+        system_prompt = str(body.get("system") or "").strip() or None
         conversation_messages: List[Dict[str, str]] = []
 
         for idx, msg in enumerate(messages):

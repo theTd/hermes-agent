@@ -21,6 +21,7 @@ import re
 import sqlite3
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 from agent.memory_manager import sanitize_context
@@ -1476,6 +1477,26 @@ class SessionDB:
             num_tool_calls = len(tool_calls) if isinstance(tool_calls, list) else 1
 
         def _do(conn):
+            # Idempotency guard: skip if the last message in this session is
+            # identical to the one we are about to append.  This catches edge
+            # cases where _last_flushed_db_idx or conversation_history bounds
+            # are misaligned (e.g. session split + stale history).
+            last = conn.execute(
+                "SELECT role, content, tool_call_id FROM messages "
+                "WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            if (
+                last
+                and last["role"] == role
+                and last["content"] == stored_content
+                and last["tool_call_id"] == tool_call_id
+            ):
+                return conn.execute(
+                    "SELECT id FROM messages WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                    (session_id,),
+                ).fetchone()["id"]
+
             cursor = conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, timestamp, token_count, finish_reason,
@@ -1596,6 +1617,16 @@ class SessionDB:
 
         self._execute_write(_do)
 
+    @staticmethod
+    def _format_timestamp(ts: Any) -> Optional[str]:
+        """Convert a stored timestamp (float epoch) to ISO format string."""
+        if ts is None:
+            return None
+        try:
+            return datetime.fromtimestamp(float(ts)).isoformat()
+        except (TypeError, ValueError, OSError, OverflowError):
+            return None
+
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages for a session, ordered by insertion order."""
         with self._lock:
@@ -1615,6 +1646,9 @@ class SessionDB:
                 except (json.JSONDecodeError, TypeError):
                     logger.warning("Failed to deserialize tool_calls in get_messages, falling back to []")
                     msg["tool_calls"] = []
+            _ts = self._format_timestamp(msg.pop("timestamp", None))
+            if _ts:
+                msg["timestamp"] = _ts
             result.append(msg)
         return result
 
@@ -1897,7 +1931,7 @@ class SessionDB:
             rows = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items "
+                "codex_reasoning_items, codex_message_items, timestamp "
                 f"FROM messages WHERE session_id IN ({placeholders}) ORDER BY id",
                 tuple(session_ids),
             ).fetchall()
@@ -1948,6 +1982,9 @@ class SessionDB:
                         msg["codex_message_items"] = None
             if include_ancestors and self._is_duplicate_replayed_user_message(messages, msg):
                 continue
+            _ts = self._format_timestamp(row["timestamp"])
+            if _ts:
+                msg["timestamp"] = _ts
             messages.append(msg)
         return messages
 

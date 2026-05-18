@@ -1,0 +1,5 @@
+name: lightrag
+version: 1.0.0
+description: "LightRAG server-backed memory provider with automatic recall, explicit retrieval tools, and batched append-only writes."
+hooks:
+  - on_session_end

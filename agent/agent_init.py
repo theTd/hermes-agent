@@ -42,6 +42,7 @@ from agent.model_metadata import (
     query_ollama_num_ctx,
 )
 from agent.process_bootstrap import _install_safe_stdio
+from agent.runtime_context import AgentRuntimeContext
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.think_scrubber import StreamingThinkScrubber
 from agent.tool_guardrails import (
@@ -55,10 +56,6 @@ from hermes_constants import get_hermes_home
 from model_tools import check_toolset_requirements, get_tool_definitions
 from utils import base_url_host_matches
 
-# Use the same logger name as run_agent so tests patching ``run_agent.logger``
-# capture our warnings.  (run_agent.py also does
-# ``logger = logging.getLogger(__name__)``, which resolves to "run_agent"
-# from inside that module.)
 logger = logging.getLogger("run_agent")
 
 
@@ -82,7 +79,7 @@ def init_agent(
     command: str = None,
     args: list[str] | None = None,
     model: str = "",
-    max_iterations: int = 90,  # Default tool-calling iterations (shared with subagents)
+    max_iterations: int = 90,
     tool_delay: float = 1.0,
     enabled_toolsets: List[str] = None,
     disabled_toolsets: List[str] = None,
@@ -117,13 +114,7 @@ def init_agent(
     request_overrides: Dict[str, Any] = None,
     prefill_messages: List[Dict[str, Any]] = None,
     platform: str = None,
-    user_id: str = None,
-    user_name: str = None,
-    chat_id: str = None,
-    chat_name: str = None,
-    chat_type: str = None,
-    thread_id: str = None,
-    gateway_session_key: str = None,
+    runtime_context: AgentRuntimeContext | None = None,
     skip_context_files: bool = False,
     load_soul_identity: bool = False,
     skip_memory: bool = False,
@@ -137,54 +128,58 @@ def init_agent(
     checkpoint_max_total_size_mb: int = 500,
     checkpoint_max_file_size_mb: int = 10,
     pass_session_id: bool = False,
+    persist_session: bool = True,
+    split_session_on_compress: bool = True,
 ):
     """
     Initialize the AI Agent.
 
     Args:
-        base_url (str): Base URL for the model API (optional)
-        api_key (str): API key for authentication (optional, uses env var if not provided)
-        provider (str): Provider identifier (optional; used for telemetry/routing hints)
-        api_mode (str): API mode override: "chat_completions" or "codex_responses"
-        model (str): Model name to use (default: "anthropic/claude-opus-4.6")
-        max_iterations (int): Maximum number of tool calling iterations (default: 90)
-        tool_delay (float): Delay between tool calls in seconds (default: 1.0)
-        enabled_toolsets (List[str]): Only enable tools from these toolsets (optional)
-        disabled_toolsets (List[str]): Disable tools from these toolsets (optional)
-        save_trajectories (bool): Whether to save conversation trajectories to JSONL files (default: False)
-        verbose_logging (bool): Enable verbose logging for debugging (default: False)
-        quiet_mode (bool): Suppress progress output for clean CLI experience (default: False)
-        ephemeral_system_prompt (str): System prompt used during agent execution but NOT saved to trajectories (optional)
-        log_prefix_chars (int): Number of characters to show in log previews for tool calls/responses (default: 100)
-        log_prefix (str): Prefix to add to all log messages for identification in parallel processing (default: "")
-        providers_allowed (List[str]): OpenRouter providers to allow (optional)
-        providers_ignored (List[str]): OpenRouter providers to ignore (optional)
-        providers_order (List[str]): OpenRouter providers to try in order (optional)
-        provider_sort (str): Sort providers by price/throughput/latency (optional)
-        openrouter_min_coding_score (float): Coding-score floor (0.0-1.0) for the
-            openrouter/pareto-code router. Only applied when model == "openrouter/pareto-code".
-            None or empty = let OpenRouter pick the strongest available coder.
-        session_id (str): Pre-generated session ID for logging (optional, auto-generated if not provided)
-        tool_progress_callback (callable): Callback function(tool_name, args_preview) for progress notifications
-        clarify_callback (callable): Callback function(question, choices) -> str for interactive user questions.
-            Provided by the platform layer (CLI or gateway). If None, the clarify tool returns an error.
-        max_tokens (int): Maximum tokens for model responses (optional, uses model default if not set)
-        reasoning_config (Dict): OpenRouter reasoning configuration override (e.g. {"effort": "none"} to disable thinking).
-            If None, defaults to {"enabled": True, "effort": "medium"} for OpenRouter. Set to disable/customize reasoning.
-        prefill_messages (List[Dict]): Messages to prepend to conversation history as prefilled context.
-            Useful for injecting a few-shot example or priming the model's response style.
-            Example: [{"role": "user", "content": "Hi!"}, {"role": "assistant", "content": "Hello!"}]
-            NOTE: Anthropic Sonnet 4.6+ and Opus 4.6+ reject a conversation that ends on an
-            assistant-role message (400 error).  For those models use structured outputs or
-            output_config.format instead of a trailing-assistant prefill.
-        platform (str): The interface platform the user is on (e.g. "cli", "telegram", "discord", "whatsapp").
-            Used to inject platform-specific formatting hints into the system prompt.
-        skip_context_files (bool): If True, skip auto-injection of SOUL.md, AGENTS.md, and .cursorrules
-            into the system prompt. Use this for batch processing and data generation to avoid
-            polluting trajectories with user-specific persona or project instructions.
-        load_soul_identity (bool): If True, still use ~/.hermes/SOUL.md as the primary
-            identity even when skip_context_files=True. Project context files from the cwd
-            remain skipped.
+    base_url (str): Base URL for the model API (optional)
+    api_key (str): API key for authentication (optional, uses env var if not provided)
+    provider (str): Provider identifier (optional; used for telemetry/routing hints)
+    api_mode (str): API mode override: "chat_completions" or "codex_responses"
+    model (str): Model name to use (default: "anthropic/claude-opus-4.6")
+    max_iterations (int): Maximum number of tool calling iterations (default: 90)
+    tool_delay (float): Delay between tool calls in seconds (default: 1.0)
+    enabled_toolsets (List[str]): Only enable tools from these toolsets (optional)
+    disabled_toolsets (List[str]): Disable tools from these toolsets (optional)
+    save_trajectories (bool): Whether to save conversation trajectories to JSONL files (default: False)
+    verbose_logging (bool): Enable verbose logging for debugging (default: False)
+    quiet_mode (bool): Suppress progress output for clean CLI experience (default: False)
+    ephemeral_system_prompt (str): System prompt used during agent execution but NOT saved to trajectories (optional)
+    log_prefix_chars (int): Number of characters to show in log previews for tool calls/responses (default: 100)
+    log_prefix (str): Prefix to add to all log messages for identification in parallel processing (default: "")
+    providers_allowed (List[str]): OpenRouter providers to allow (optional)
+    providers_ignored (List[str]): OpenRouter providers to ignore (optional)
+    providers_order (List[str]): OpenRouter providers to try in order (optional)
+    provider_sort (str): Sort providers by price/throughput/latency (optional)
+    openrouter_min_coding_score (float): Coding-score floor (0.0-1.0) for the
+    openrouter/pareto-code router. Only applied when model == "openrouter/pareto-code".
+    None or empty = let OpenRouter pick the strongest available coder.
+    session_id (str): Pre-generated session ID for logging (optional, auto-generated if not provided)
+    tool_progress_callback (callable): Callback function(tool_name, args_preview) for progress notifications
+    clarify_callback (callable): Callback function(question, choices) -> str for interactive user questions.
+    Provided by the platform layer (CLI or gateway). If None, the clarify tool returns an error.
+    max_tokens (int): Maximum tokens for model responses (optional, uses model default if not set)
+    reasoning_config (Dict): OpenRouter reasoning configuration override (e.g. {"effort": "none"} to disable thinking).
+    If None, defaults to {"enabled": True, "effort": "medium"} for OpenRouter. Set to disable/customize reasoning.
+    prefill_messages (List[Dict]): Messages to prepend to conversation history as prefilled context.
+    Useful for injecting a few-shot example or priming the model's response style.
+    Example: [{"role": "user", "content": "Hi!"}, {"role": "assistant", "content": "Hello!"}]
+    NOTE: Anthropic Sonnet 4.6+ and Opus 4.6+ reject a conversation that ends on an
+    assistant-role message (400 error).  For those models use structured outputs or
+    output_config.format instead of a trailing-assistant prefill.
+    platform (str): The interface platform the user is on (e.g. "cli", "telegram", "discord", "whatsapp").
+    Used to inject platform-specific formatting hints into the system prompt.
+    skip_context_files (bool): If True, skip auto-injection of SOUL.md, AGENTS.md, and .cursorrules
+    into the system prompt. Use this for batch processing and data generation to avoid
+    polluting trajectories with user-specific persona or project instructions.
+    runtime_context (AgentRuntimeContext | None): Gateway/session-scoped runtime metadata.
+        Replaces the legacy user_id/chat_id/thread_id/gateway_session_key parameters.
+    load_soul_identity (bool): If True, still use ~/.hermes/SOUL.md as the primary
+    identity even when skip_context_files=True. Project context files from the cwd
+    remain skipped.
     """
     _install_safe_stdio()
 
@@ -199,13 +194,7 @@ def init_agent(
     agent.quiet_mode = quiet_mode
     agent.ephemeral_system_prompt = ephemeral_system_prompt
     agent.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
-    agent._user_id = user_id  # Platform user identifier (gateway sessions)
-    agent._user_name = user_name
-    agent._chat_id = chat_id
-    agent._chat_name = chat_name
-    agent._chat_type = chat_type
-    agent._thread_id = thread_id
-    agent._gateway_session_key = gateway_session_key  # Stable per-chat key (e.g. agent:main:telegram:dm:123)
+    agent.runtime_context = AgentRuntimeContext.resolve(runtime_context=runtime_context)
     # Pluggable print function — CLI replaces this with _cprint so that
     # raw ANSI status lines are routed through prompt_toolkit's renderer
     # instead of going directly to stdout where patch_stdout's StdoutProxy
@@ -215,6 +204,9 @@ def init_agent(
     agent.skip_context_files = skip_context_files
     agent.load_soul_identity = load_soul_identity
     agent.pass_session_id = pass_session_id
+    agent.persist_session = persist_session
+    agent.split_session_on_compress = bool(split_session_on_compress)
+    agent._force_session_log_overwrite = False
     agent._credential_pool = credential_pool
     agent.log_prefix_chars = log_prefix_chars
     agent.log_prefix = f"{log_prefix} " if log_prefix else ""
@@ -416,7 +408,7 @@ def init_agent(
 
         _pc_cfg = _load_pc_cfg().get("prompt_caching", {}) or {}
         _ttl = _pc_cfg.get("cache_ttl", "5m")
-        if _ttl in {"5m", "1h"}:
+        if _ttl in ("5m", "1h"):
             agent._cache_ttl = _ttl
     except Exception:
         pass
@@ -455,7 +447,7 @@ def init_agent(
 
     if agent.verbose_logging:
         setup_verbose_logging()
-        _ra().logger.info("Verbose logging enabled (third-party library logs suppressed)")
+        logger.info("Verbose logging enabled (third-party library logs suppressed)")
     elif agent.quiet_mode:
         # In quiet mode (CLI default), keep console output clean —
         # but DO NOT raise per-logger levels. Doing so prevents the
@@ -491,6 +483,11 @@ def init_agent(
     # commentary when the provider later returns it as a completed interim
     # assistant message.
     agent._current_streamed_assistant_text = ""
+    # Reasoning text already delivered through live callbacks during the
+    # current model response. Used to avoid duplicating final reasoning
+    # while still allowing a fallback when providers only expose it at
+    # message-finalization time.
+    agent._current_streamed_reasoning_text = ""
 
     # Optional current-turn user-message override used when the API-facing
     # user message intentionally differs from the persisted transcript
@@ -681,7 +678,7 @@ def init_agent(
                 # but no credentials were found, fail fast with a clear
                 # message instead of silently routing through OpenRouter.
                 _explicit = (agent.provider or "").strip().lower()
-                if _explicit and _explicit not in {"auto", "openrouter", "custom"}:
+                if _explicit and _explicit not in ("auto", "openrouter", "custom"):
                     # Look up the actual env var name from the provider
                     # config — some providers use non-standard names
                     # (e.g. alibaba → DASHSCOPE_API_KEY, not ALIBABA_API_KEY).
@@ -849,7 +846,7 @@ def init_agent(
 
     # Check tool requirements
     if agent.tools and not agent.quiet_mode:
-        requirements = _ra().check_toolset_requirements()
+        requirements = check_toolset_requirements()
         missing_reqs = [name for name, available in requirements.items() if not available]
         if missing_reqs:
             print(f"⚠️  Some tools may not work due to missing requirements: {missing_reqs}")
@@ -883,20 +880,7 @@ def init_agent(
         timestamp_str = agent.session_start.strftime("%Y%m%d_%H%M%S")
         short_uuid = uuid.uuid4().hex[:6]
         agent.session_id = f"{timestamp_str}_{short_uuid}"
-
-    # Expose session ID to tools (terminal, execute_code) so agents can
-    # reference their own session for --resume commands, cross-session
-    # coordination, and logging.  Uses the ContextVar system from
-    # session_context.py for concurrency safety (gateway runs multiple
-    # sessions in one process).  Also writes os.environ as fallback for
-    # CLI mode where ContextVars aren't used.
-    os.environ["HERMES_SESSION_ID"] = agent.session_id
-    try:
-        from gateway.session_context import _SESSION_ID
-        _SESSION_ID.set(agent.session_id)
-    except Exception:
-        pass  # CLI/test mode — ContextVar not needed
-
+    
     # Session logs go into ~/.hermes/sessions/ alongside gateway sessions
     hermes_home = get_hermes_home()
     agent.logs_dir = hermes_home / "sessions"
@@ -934,7 +918,7 @@ def init_agent(
     # In-memory todo list for task planning (one per agent/session)
     from tools.todo_tool import TodoStore
     agent._todo_store = TodoStore()
-    
+
     # Load config once for memory, skills, and compression sections
     try:
         from hermes_cli.config import load_config as _load_agent_config
@@ -948,7 +932,7 @@ def init_agent(
             )
         )
     except Exception as _tlg_err:
-        _ra().logger.warning("Tool loop guardrail config ignored: %s", _tlg_err)
+        logger.warning("Tool loop guardrail config ignored: %s", _tlg_err)
     # Cache only the derived auxiliary compression context override that is
     # needed later by the startup feasibility check.  Avoid exposing a
     # broad pseudo-public config object on the agent instance.
@@ -972,6 +956,12 @@ def init_agent(
                 agent._memory_store = MemoryStore(
                     memory_char_limit=mem_config.get("memory_char_limit", 2200),
                     user_char_limit=mem_config.get("user_char_limit", 1375),
+                    chat_char_limit=mem_config.get("chat_char_limit", mem_config.get("memory_char_limit", 2200)),
+                    platform=agent.platform or "",
+                    user_id=agent.runtime_context.user_id or "",
+                    chat_id=agent.runtime_context.chat_id or "",
+                    chat_type=agent.runtime_context.chat_type or "",
+                    thread_id=agent.runtime_context.thread_id or "",
                 )
                 agent._memory_store.load_from_disk()
         except Exception:
@@ -994,12 +984,12 @@ def init_agent(
                 if _mp and _mp.is_available():
                     agent._memory_manager.add_provider(_mp)
                 if agent._memory_manager.providers:
-                    _init_kwargs = {
-                        "session_id": agent.session_id,
-                        "platform": platform or "cli",
-                        "hermes_home": str(get_hermes_home()),
-                        "agent_context": "primary",
-                    }
+                    _init_kwargs = agent.runtime_context.to_memory_provider_kwargs(
+                        platform=platform or "cli",
+                        hermes_home=str(get_hermes_home()),
+                        parent_session_id=agent._parent_session_id,
+                    )
+                    _init_kwargs["session_id"] = agent.session_id
                     # Thread session title for memory provider scoping
                     # (e.g. honcho uses this to derive chat-scoped session keys)
                     if agent._session_db:
@@ -1009,43 +999,28 @@ def init_agent(
                                 _init_kwargs["session_title"] = _st
                         except Exception:
                             pass
-                    # Thread gateway user identity for per-user memory scoping
-                    if agent._user_id:
-                        _init_kwargs["user_id"] = agent._user_id
-                    if agent._user_name:
-                        _init_kwargs["user_name"] = agent._user_name
-                    if agent._chat_id:
-                        _init_kwargs["chat_id"] = agent._chat_id
-                    if agent._chat_name:
-                        _init_kwargs["chat_name"] = agent._chat_name
-                    if agent._chat_type:
-                        _init_kwargs["chat_type"] = agent._chat_type
-                    if agent._thread_id:
-                        _init_kwargs["thread_id"] = agent._thread_id
-                    # Thread gateway session key for stable per-chat Honcho session isolation
-                    if agent._gateway_session_key:
-                        _init_kwargs["gateway_session_key"] = agent._gateway_session_key
                     # Profile identity for per-profile provider scoping
                     try:
                         from hermes_cli.profiles import get_active_profile_name
                         _profile = get_active_profile_name()
-                        _init_kwargs["agent_identity"] = _profile
+                        if _profile:
+                            _init_kwargs["agent_identity"] = _profile
                         _init_kwargs["agent_workspace"] = "hermes"
                     except Exception:
                         pass
                     agent._memory_manager.initialize_all(**_init_kwargs)
-                    _ra().logger.info("Memory provider '%s' activated", _mem_provider_name)
+                    logger.info("Memory provider '%s' activated", _mem_provider_name)
                 else:
-                    _ra().logger.debug("Memory provider '%s' not found or not available", _mem_provider_name)
+                    logger.debug("Memory provider '%s' not found or not available", _mem_provider_name)
                     agent._memory_manager = None
         except Exception as _mpe:
-            _ra().logger.warning("Memory provider plugin init failed: %s", _mpe)
+            logger.warning("Memory provider plugin init failed: %s", _mpe)
             agent._memory_manager = None
 
     # Inject memory provider tool schemas into the tool surface.
     # Skip tools whose names already exist (plugins may register the
     # same tools via ctx.register_tool(), which lands in agent.tools
-    # through _ra().get_tool_definitions()).  Duplicate function names cause
+    # through get_tool_definitions()).  Duplicate function names cause
     # 400 errors on providers that enforce unique names (e.g. Xiaomi
     # MiMo via Nous Portal).
     if agent._memory_manager and agent.tools is not None:
@@ -1103,7 +1078,7 @@ def init_agent(
             compression_threshold = _model_cthresh
     except Exception:
         pass
-    compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in {"true", "1", "yes"}
+    compression_enabled = str(_compression_cfg.get("enabled", True)).lower() in ("true", "1", "yes")
     compression_target_ratio = float(_compression_cfg.get("target_ratio", 0.20))
     compression_protect_last = int(_compression_cfg.get("protect_last_n", 20))
     # protect_first_n is the number of non-system messages to protect at
@@ -1151,7 +1126,7 @@ def init_agent(
                     raise ValueError
                 agent.max_tokens = _parsed_max_tokens
             except (TypeError, ValueError):
-                _ra().logger.warning(
+                logger.warning(
                     "Invalid model.max_tokens in config.yaml: %r — "
                     "must be a positive integer (e.g. 4096). "
                     "Falling back to provider default.",
@@ -1174,7 +1149,7 @@ def init_agent(
         try:
             _config_context_length = int(_config_context_length)
         except (TypeError, ValueError):
-            _ra().logger.warning(
+            logger.warning(
                 "Invalid model.context_length in config.yaml: %r — "
                 "must be a plain integer (e.g. 256000, not '256K'). "
                 "Falling back to auto-detection.",
@@ -1236,7 +1211,7 @@ def init_agent(
                                     if _parsed <= 0:
                                         raise ValueError
                                 except (TypeError, ValueError):
-                                    _ra().logger.warning(
+                                    logger.warning(
                                         "Invalid context_length for model %r in "
                                         "custom_providers: %r — must be a positive "
                                         "integer (e.g. 256000, not '256K'). "
@@ -1278,7 +1253,7 @@ def init_agent(
             from plugins.context_engine import load_context_engine
             _selected_engine = load_context_engine(_engine_name)
         except Exception as _ce_load_err:
-            _ra().logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
+            logger.debug("Context engine load from plugins/context_engine/: %s", _ce_load_err)
 
         # Try general plugin system as fallback
         if _selected_engine is None:
@@ -1291,7 +1266,7 @@ def init_agent(
                 pass
 
         if _selected_engine is None:
-            _ra().logger.warning(
+            logger.warning(
                 "Context engine '%s' not found — falling back to built-in compressor",
                 _engine_name,
             )
@@ -1317,7 +1292,7 @@ def init_agent(
             provider=agent.provider,
         )
         if not agent.quiet_mode:
-            _ra().logger.info("Using context engine: %s", _selected_engine.name)
+            logger.info("Using context engine: %s", _selected_engine.name)
     else:
         agent.context_compressor = ContextCompressor(
             model=agent.model,
@@ -1350,7 +1325,7 @@ def init_agent(
         )
 
     # Inject context engine tool schemas (e.g. lcm_grep, lcm_describe, lcm_expand).
-    # Skip names that are already present — the _ra().get_tool_definitions()
+    # Skip names that are already present — the get_tool_definitions()
     # quiet_mode cache returned a shared list pre-#17335, so a stray
     # mutation here would poison subsequent agent inits in the same
     # Gateway process and trip provider-side 'duplicate tool name'
@@ -1386,7 +1361,7 @@ def init_agent(
                 context_length=getattr(agent.context_compressor, "context_length", 0),
             )
         except Exception as _ce_err:
-            _ra().logger.debug("Context engine on_session_start: %s", _ce_err)
+            logger.debug("Context engine on_session_start: %s", _ce_err)
 
     agent._subdirectory_hints = SubdirectoryHintTracker(
         working_dir=os.getenv("TERMINAL_CWD") or None,
@@ -1422,7 +1397,7 @@ def init_agent(
         try:
             agent._ollama_num_ctx = int(_ollama_num_ctx_override)
         except (TypeError, ValueError):
-            _ra().logger.debug("Invalid ollama_num_ctx config value: %r", _ollama_num_ctx_override)
+            logger.debug("Invalid ollama_num_ctx config value: %r", _ollama_num_ctx_override)
     if agent._ollama_num_ctx is None and agent.base_url and is_local_endpoint(agent.base_url):
         try:
             # ``agent.api_key`` may be a callable (Entra token provider).
@@ -1434,7 +1409,7 @@ def init_agent(
             if _detected and _detected > 0:
                 agent._ollama_num_ctx = _detected
         except Exception as exc:
-            _ra().logger.debug("Ollama num_ctx detection failed: %s", exc)
+            logger.debug("Ollama num_ctx detection failed: %s", exc)
     # Cap auto-detected ollama_num_ctx to the user's explicit context_length.
     # Without this, GGUF metadata can advertise 256K+ which Ollama honours
     # by allocating that much VRAM — blowing up small GPUs even though the
@@ -1445,13 +1420,13 @@ def init_agent(
         and _ollama_num_ctx_override is None  # don't override explicit ollama_num_ctx
         and agent._ollama_num_ctx > _config_context_length
     ):
-        _ra().logger.info(
+        logger.info(
             "Ollama num_ctx capped: %d -> %d (model.context_length override)",
             agent._ollama_num_ctx, _config_context_length,
         )
         agent._ollama_num_ctx = _config_context_length
     if agent._ollama_num_ctx and not agent.quiet_mode:
-        _ra().logger.info(
+        logger.info(
             "Ollama num_ctx: will request %d tokens (model max from /api/show)",
             agent._ollama_num_ctx,
         )

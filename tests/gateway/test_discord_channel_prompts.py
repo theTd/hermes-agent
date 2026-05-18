@@ -36,12 +36,29 @@ from gateway.session import SessionSource
 
 class _CapturingAgent:
     last_init = None
+    last_run_kwargs = None
 
     def __init__(self, *args, **kwargs):
         type(self).last_init = dict(kwargs)
         self.tools = []
 
-    def run_conversation(self, user_message, conversation_history=None, task_id=None, persist_user_message=None):
+    def run_conversation(
+        self,
+        user_message,
+        conversation_history=None,
+        task_id=None,
+        persist_user_message=None,
+        turn_user_context=None,
+        control_user_context=None,
+    ):
+        type(self).last_run_kwargs = {
+            "user_message": user_message,
+            "conversation_history": conversation_history,
+            "task_id": task_id,
+            "persist_user_message": persist_user_message,
+            "turn_user_context": turn_user_context,
+            "control_user_context": control_user_context,
+        }
         return {
             "final_response": "ok",
             "messages": [],
@@ -253,6 +270,7 @@ async def test_run_agent_appends_channel_prompt_to_ephemeral_system_prompt(monke
     )
 
     assert result["final_response"] == "ok"
-    assert _CapturingAgent.last_init["ephemeral_system_prompt"] == (
-        "Context prompt\n\nChannel prompt\n\nGlobal prompt"
+    assert _CapturingAgent.last_init["ephemeral_system_prompt"] == "Global prompt"
+    assert _CapturingAgent.last_run_kwargs["turn_user_context"] == (
+        "Context prompt\n\nChannel prompt"
     )

@@ -30,6 +30,7 @@ from concurrent.futures import (
 )
 from typing import Any, Dict, List, Optional
 
+from agent.runtime_context import AgentRuntimeContext
 from toolsets import TOOLSETS
 
 # Sentinel value used by the runtime provider system for providers that are
@@ -1121,6 +1122,9 @@ def _build_child_agent(
         ephemeral_system_prompt=child_prompt,
         log_prefix=f"[subagent-{task_index}]",
         platform=parent_agent.platform,
+        runtime_context=getattr(parent_agent, "runtime_context", None)
+        if isinstance(getattr(parent_agent, "runtime_context", None), AgentRuntimeContext)
+        else None,
         skip_context_files=True,
         skip_memory=True,
         clarify_callback=None,

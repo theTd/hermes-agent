@@ -1153,7 +1153,7 @@ class TestChatCompletionsEndpoint:
 
     @pytest.mark.asyncio
     async def test_system_prompt_extracted(self, adapter):
-        """System messages from the client are passed as ephemeral_system_prompt."""
+        """Top-level system prompts are passed as ephemeral_system_prompt."""
         mock_result = {
             "final_response": "I am a pirate! Arrr!",
             "messages": [],
@@ -1168,8 +1168,8 @@ class TestChatCompletionsEndpoint:
                     "/v1/chat/completions",
                     json={
                         "model": "hermes-agent",
+                        "system": "You are a pirate.",
                         "messages": [
-                            {"role": "system", "content": "You are a pirate."},
                             {"role": "user", "content": "Hello"},
                         ],
                     },
@@ -2281,13 +2281,13 @@ class TestConfigIntegration:
 
 
 # ---------------------------------------------------------------------------
-# Multiple system messages
+# Top-level system field
 # ---------------------------------------------------------------------------
 
 
-class TestMultipleSystemMessages:
+class TestTopLevelSystemField:
     @pytest.mark.asyncio
-    async def test_multiple_system_messages_concatenated(self, adapter):
+    async def test_top_level_system_field_is_forwarded(self, adapter):
         mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
 
         app = _create_app(adapter)
@@ -2298,9 +2298,8 @@ class TestMultipleSystemMessages:
                     "/v1/chat/completions",
                     json={
                         "model": "hermes-agent",
+                        "system": "You are helpful.\n\nBe concise.",
                         "messages": [
-                            {"role": "system", "content": "You are helpful."},
-                            {"role": "system", "content": "Be concise."},
                             {"role": "user", "content": "Hello"},
                         ],
                     },
@@ -2311,6 +2310,25 @@ class TestMultipleSystemMessages:
             prompt = call_kwargs["ephemeral_system_prompt"]
             assert "You are helpful." in prompt
             assert "Be concise." in prompt
+
+    @pytest.mark.asyncio
+    async def test_system_role_inside_messages_is_rejected(self, adapter):
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            resp = await cli.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "hermes-agent",
+                    "messages": [
+                        {"role": "system", "content": "old format"},
+                        {"role": "user", "content": "Hello"},
+                    ],
+                    },
+                )
+            data = await resp.json()
+
+        assert resp.status == 400
+        assert "top-level 'system' field" in data["error"]["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -3254,7 +3272,8 @@ class TestSessionKeyHeader:
 
     @pytest.mark.asyncio
     async def test_session_key_threads_into_create_agent(self, auth_adapter):
-        """End-to-end: verify AIAgent(gateway_session_key=...) receives the key via _create_agent."""
+        """End-to-end: verify AIAgent(runtime_context=AgentRuntimeContext(gateway_session_key=...))
+        receives the key via _create_agent."""
         captured_kwargs = {}
 
         def _fake_create_agent(**kwargs):

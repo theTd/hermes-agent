@@ -9,12 +9,18 @@ import logging
 import os
 import re
 import sys
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import get_config_path, get_skills_dir
 
 logger = logging.getLogger(__name__)
+
+_DYNAMIC_DISABLED_SKILLS: ContextVar[frozenset[str]] = ContextVar(
+    "dynamic_disabled_skills",
+    default=frozenset(),
+)
 
 # ── Platform mapping ──────────────────────────────────────────────────────
 
@@ -151,13 +157,28 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
         or os.getenv("HERMES_PLATFORM")
         or get_session_env("HERMES_SESSION_PLATFORM")
     )
+    disabled: Set[str]
     if resolved_platform:
         platform_disabled = (skills_cfg.get("platform_disabled") or {}).get(
             resolved_platform
         )
         if platform_disabled is not None:
-            return _normalize_string_set(platform_disabled)
-    return _normalize_string_set(skills_cfg.get("disabled"))
+            disabled = _normalize_string_set(platform_disabled)
+        else:
+            disabled = _normalize_string_set(skills_cfg.get("disabled"))
+    else:
+        disabled = _normalize_string_set(skills_cfg.get("disabled"))
+    return disabled | set(_DYNAMIC_DISABLED_SKILLS.get())
+
+
+def set_dynamic_disabled_skill_names(values: Set[str]):
+    """Set per-context disabled skill names for the current worker thread."""
+    return _DYNAMIC_DISABLED_SKILLS.set(frozenset(str(v).strip() for v in values if str(v).strip()))
+
+
+def reset_dynamic_disabled_skill_names(token) -> None:
+    """Reset the per-context disabled skill override."""
+    _DYNAMIC_DISABLED_SKILLS.reset(token)
 
 
 def _normalize_string_set(values) -> Set[str]:

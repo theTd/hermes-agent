@@ -48,6 +48,32 @@ def test_cleanup_agent_resources_reaps_stale_aux_clients():
 
 
 @pytest.mark.asyncio
+async def test_cancel_background_tasks_times_out_on_stubborn_task():
+    _runner, adapter = make_restart_runner()
+    adapter._BACKGROUND_TASK_CANCEL_TIMEOUT = 0.01
+    stubborn_release = asyncio.Event()
+
+    async def stubborn_task():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await stubborn_release.wait()
+
+    task = asyncio.create_task(stubborn_task())
+    adapter._background_tasks.add(task)
+
+    await adapter.cancel_background_tasks()
+
+    assert adapter._background_tasks == set()
+    assert adapter._active_sessions == {}
+    assert adapter._pending_messages == {}
+
+    stubborn_release.set()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_gateway_stop_interrupts_running_agents_and_cancels_adapter_tasks():
     runner, adapter = make_restart_runner()
     runner._pending_messages = {"session": "pending text"}
@@ -92,13 +118,19 @@ async def test_gateway_stop_interrupts_running_agents_and_cancels_adapter_tasks(
 @pytest.mark.asyncio
 async def test_gateway_stop_drains_running_agents_before_disconnect():
     runner, adapter = make_restart_runner()
-    disconnect_mock = AsyncMock()
-    adapter.disconnect = disconnect_mock
+    disconnect_seen = asyncio.Event()
+
+    async def _disconnect():
+        assert "session" in runner._running_agents
+        disconnect_seen.set()
+
+    adapter.disconnect = AsyncMock(side_effect=_disconnect)
 
     running_agent = MagicMock()
     runner._running_agents = {"session": running_agent}
 
     async def finish_agent():
+        await disconnect_seen.wait()
         await asyncio.sleep(0.05)
         runner._running_agents.clear()
 
@@ -108,8 +140,28 @@ async def test_gateway_stop_drains_running_agents_before_disconnect():
         await runner.stop()
 
     running_agent.interrupt.assert_not_called()
-    disconnect_mock.assert_awaited_once()
+    adapter.disconnect.assert_awaited_once()
     assert runner._shutdown_event.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_stop_notifies_before_disconnect():
+    runner, adapter = make_restart_runner()
+    runner._restart_drain_timeout = 0.0
+    running_agent = MagicMock()
+    runner._running_agents = {"agent:main:telegram:dm:123456": running_agent}
+
+    send_mock = AsyncMock(return_value=None)
+    disconnect_mock = AsyncMock()
+    adapter.send = send_mock
+    adapter.disconnect = disconnect_mock
+
+    with patch("gateway.status.remove_pid_file"), patch("gateway.status.write_runtime_status"):
+        await runner.stop()
+
+    send_mock.assert_awaited_once()
+    disconnect_mock.assert_awaited_once()
+    assert send_mock.await_args_list[0].args[1].startswith("⚠️ Gateway shutting down")
 
 
 @pytest.mark.asyncio

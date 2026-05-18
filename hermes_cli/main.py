@@ -124,7 +124,7 @@ def _apply_profile_override() -> None:
 
     # 1. Check for explicit -p / --profile flag
     for i, arg in enumerate(argv):
-        if arg in {"--profile", "-p"} and i + 1 < len(argv):
+        if arg in ("--profile", "-p") and i + 1 < len(argv):
             profile_name = argv[i + 1]
             consume = 2
             break
@@ -192,7 +192,7 @@ def _apply_profile_override() -> None:
         # Strip the flag from argv so argparse doesn't choke
         if consume > 0:
             for i, arg in enumerate(argv):
-                if arg in {"--profile", "-p"}:
+                if arg in ("--profile", "-p"):
                     start = i + 1  # +1 because argv is sys.argv[1:]
                     sys.argv = sys.argv[:start] + sys.argv[start + consume :]
                     break
@@ -207,8 +207,18 @@ _apply_profile_override()
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.config import get_hermes_home
+from hermes_cli.commands_extension import register_branch_cli_commands
 from hermes_cli.env_loader import load_hermes_dotenv
-
+from hermes_cli.update_source import (
+    STANDALONE_REPO_URL,
+    STANDALONE_UPDATE_BRANCH,
+    fetch_standalone_update_ref,
+    is_standalone_repo_url,
+    standalone_install_command,
+    standalone_update_label,
+    standalone_update_ref,
+    standalone_zip_url,
+)
 load_hermes_dotenv(project_env=PROJECT_ROOT / ".env")
 
 # Bridge security.redact_secrets from config.yaml → HERMES_REDACT_SECRETS env
@@ -567,13 +577,13 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                 stdscr.refresh()
                 key = stdscr.getch()
 
-                if key in {curses.KEY_UP,}:
+                if key in (curses.KEY_UP,):
                     if filtered:
                         cursor = (cursor - 1) % len(filtered)
-                elif key in {curses.KEY_DOWN,}:
+                elif key in (curses.KEY_DOWN,):
                     if filtered:
                         cursor = (cursor + 1) % len(filtered)
-                elif key in {curses.KEY_ENTER, 10, 13}:
+                elif key in (curses.KEY_ENTER, 10, 13):
                     if filtered:
                         result_holder[0] = filtered[cursor]["id"]
                     return
@@ -587,7 +597,7 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
                     else:
                         # Second Esc exits
                         return
-                elif key in {curses.KEY_BACKSPACE, 127, 8}:
+                elif key in (curses.KEY_BACKSPACE, 127, 8):
                     if search_text:
                         search_text = search_text[:-1]
                         if search_text:
@@ -626,7 +636,7 @@ def _session_browse_picker(sessions: list) -> Optional[str]:
     while True:
         try:
             val = input(f"\n  Select [1-{len(sessions)}]: ").strip()
-            if not val or val.lower() in {"q", "quit", "exit"}:
+            if not val or val.lower() in ("q", "quit", "exit"):
                 return None
             idx = int(val) - 1
             if 0 <= idx < len(sessions):
@@ -1297,7 +1307,7 @@ def _launch_tui(
         except KeyboardInterrupt:
             code = 130
 
-        if code in {0, 130}:
+        if code in (0, 130):
             _print_tui_exit_summary(resume_session_id, active_session_file)
     finally:
         try:
@@ -1409,7 +1419,7 @@ def cmd_chat(args):
             reply = input("Run setup now? [Y/n] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             reply = "n"
-        if reply in {"", "y", "yes"}:
+        if reply in ("", "y", "yes"):
             cmd_setup(args)
             return
         print()
@@ -1604,7 +1614,7 @@ def cmd_whatsapp(args):
             response = input("\n  Update allowed users? [y/N] ").strip()
         except (EOFError, KeyboardInterrupt):
             response = "n"
-        if response.lower() in {"y", "yes"}:
+        if response.lower() in ("y", "yes"):
             if wa_mode == "bot":
                 phone = input(
                     "  Phone numbers that can message the bot (comma-separated): "
@@ -1679,7 +1689,7 @@ def cmd_whatsapp(args):
             ).strip()
         except (EOFError, KeyboardInterrupt):
             response = "n"
-        if response.lower() in {"y", "yes"}:
+        if response.lower() in ("y", "yes"):
             shutil.rmtree(session_dir, ignore_errors=True)
             session_dir.mkdir(parents=True, exist_ok=True)
             print("  ✓ Session cleared")
@@ -2067,7 +2077,7 @@ def select_provider_and_model(args=None):
         _model_flow_bedrock(config, current_model)
     elif selected_provider == "azure-foundry":
         _model_flow_azure_foundry(config, current_model)
-    elif selected_provider in {
+    elif selected_provider in (
         "gemini",
         "deepseek",
         "xai",
@@ -2087,18 +2097,18 @@ def select_provider_and_model(args=None):
         "ollama-cloud",
         "tencent-tokenhub",
         "lmstudio",
-    } or _is_profile_api_key_provider(selected_provider):
+    ) or _is_profile_api_key_provider(selected_provider):
         _model_flow_api_key_provider(config, selected_provider, current_model)
 
     # ── Post-switch cleanup: clear stale OPENAI_BASE_URL ──────────────
     # When the user switches to a named provider (anything except "custom"),
     # a leftover OPENAI_BASE_URL in ~/.hermes/.env can poison auxiliary
     # clients that use provider:auto. Clear it proactively.  (#5161)
-    if selected_provider not in {
+    if selected_provider not in (
         "custom",
         "cancel",
         "remove-custom",
-    } and not selected_provider.startswith("custom:"):
+    ) and not selected_provider.startswith("custom:"):
         _clear_stale_openai_base_url()
 
 
@@ -2223,7 +2233,7 @@ def _reset_aux_to_auto() -> int:
             entry = {}
             aux[task] = entry
         changed = False
-        if entry.get("provider") not in {None, "", "auto"}:
+        if entry.get("provider") not in (None, "", "auto"):
             entry["provider"] = "auto"
             changed = True
         for field in ("model", "base_url", "api_key"):
@@ -3238,7 +3248,7 @@ def _model_flow_custom(config):
             _add_v1 = input("  Add /v1? [Y/n]: ").strip().lower()
         except (KeyboardInterrupt, EOFError):
             _add_v1 = "n"
-        if _add_v1 in {"", "y", "yes"}:
+        if _add_v1 in ("", "y", "yes"):
             effective_url = effective_url.rstrip("/") + "/v1"
             if base_url:
                 base_url = effective_url
@@ -3297,7 +3307,7 @@ def _model_flow_custom(config):
         if len(detected_models) == 1:
             print(f"  Detected model: {detected_models[0]}")
             confirm = input("  Use this model? [Y/n]: ").strip().lower()
-            if confirm in {"", "y", "yes"}:
+            if confirm in ("", "y", "yes"):
                 model_name = detected_models[0]
             else:
                 model_name = input("Model name (e.g. gpt-4, llama-3-70b): ").strip()
@@ -4366,7 +4376,7 @@ def _model_flow_copilot(config, current_model=""):
         api_key = creds.get("api_key", "")
         source = creds.get("source", "")
     else:
-        if source in {"GITHUB_TOKEN", "GH_TOKEN"}:
+        if source in ("GITHUB_TOKEN", "GH_TOKEN"):
             print(f"  GitHub token: {api_key[:8]}... ✓ ({source})")
         elif source == "gh auth token":
             print("  GitHub token: ✓ (from `gh auth token`)")
@@ -5717,7 +5727,7 @@ def cmd_slack(args):
                  command registered as a first-class slash.
     """
     sub = getattr(args, "slack_command", None)
-    if sub in {None, ""}:
+    if sub in (None, ""):
         # No subcommand — print usage hint.
         print(
             "usage: hermes slack <subcommand>\n"
@@ -5864,7 +5874,7 @@ def _clear_bytecode_cache(root: Path) -> int:
         dirnames[:] = [
             d
             for d in dirnames
-            if d not in {"venv", ".venv", "node_modules", ".git", ".worktrees"}
+            if d not in ("venv", ".venv", "node_modules", ".git", ".worktrees")
         ]
         if os.path.basename(dirpath) == "__pycache__":
             try:
@@ -6511,12 +6521,8 @@ def _update_via_zip(args):
     import tempfile
     import zipfile
     from urllib.request import urlretrieve
-
-    branch = "main"
-    zip_url = (
-        f"https://github.com/NousResearch/hermes-agent/archive/refs/heads/{branch}.zip"
-    )
-
+    branch = STANDALONE_UPDATE_BRANCH
+    zip_url = standalone_zip_url(branch)
     print("→ Downloading latest version...")
     try:
         tmp_dir = tempfile.mkdtemp(prefix="hermes-update-")
@@ -6747,7 +6753,7 @@ def _restore_stashed_changes(
             response = input_fn("Restore local changes now? [Y/n]", "y")
         else:
             response = input().strip().lower()
-        if response not in {"", "y", "yes"}:
+        if response not in ("", "y", "yes"):
             print("Skipped restoring local changes.")
             print("Your changes are still preserved in git stash.")
             print(f"Restore manually with: git stash apply {stash_ref}")
@@ -6840,13 +6846,6 @@ def _restore_stashed_changes(
 # Fork detection and upstream management for `hermes update`
 # =========================================================================
 
-OFFICIAL_REPO_URLS = {
-    "https://github.com/NousResearch/hermes-agent.git",
-    "git@github.com:NousResearch/hermes-agent.git",
-    "https://github.com/NousResearch/hermes-agent",
-    "git@github.com:NousResearch/hermes-agent",
-}
-OFFICIAL_REPO_URL = "https://github.com/NousResearch/hermes-agent.git"
 SKIP_UPSTREAM_PROMPT_FILE = ".skip_upstream_prompt"
 
 
@@ -6867,20 +6866,8 @@ def _get_origin_url(git_cmd: list[str], cwd: Path) -> Optional[str]:
 
 
 def _is_fork(origin_url: Optional[str]) -> bool:
-    """Check if the origin remote points to a fork (not the official repo)."""
-    if not origin_url:
-        return False
-    # Normalize URL for comparison (strip trailing .git if present)
-    normalized = origin_url.rstrip("/")
-    if normalized.endswith(".git"):
-        normalized = normalized[:-4]
-    for official in OFFICIAL_REPO_URLS:
-        official_normalized = official.rstrip("/")
-        if official_normalized.endswith(".git"):
-            official_normalized = official_normalized[:-4]
-        if normalized == official_normalized:
-            return False
-    return True
+    """Check if the origin remote points to a fork (not the standalone release repo)."""
+    return bool(origin_url) and not is_standalone_repo_url(origin_url)
 
 
 def _has_upstream_remote(git_cmd: list[str], cwd: Path) -> bool:
@@ -6898,10 +6885,10 @@ def _has_upstream_remote(git_cmd: list[str], cwd: Path) -> bool:
 
 
 def _add_upstream_remote(git_cmd: list[str], cwd: Path) -> bool:
-    """Add the official repo as the 'upstream' remote. Returns True on success."""
+    """Add the standalone release repo as the 'upstream' remote. Returns True on success."""
     try:
         result = subprocess.run(
-            git_cmd + ["remote", "add", "upstream", OFFICIAL_REPO_URL],
+            git_cmd + ["remote", "add", "upstream", STANDALONE_REPO_URL],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -6926,7 +6913,6 @@ def _count_commits_between(git_cmd: list[str], cwd: Path, base: str, head: str) 
         pass
     return -1
 
-
 def _should_skip_upstream_prompt() -> bool:
     """Check if user previously declined to add upstream."""
     from hermes_constants import get_hermes_home
@@ -6945,13 +6931,13 @@ def _mark_skip_upstream_prompt():
 
 
 def _sync_fork_with_upstream(git_cmd: list[str], cwd: Path) -> bool:
-    """Attempt to push updated main to origin (sync fork).
+    """Attempt to push the standalone update branch back to origin (sync fork).
 
     Returns True if push succeeded, False otherwise.
     """
     try:
         result = subprocess.run(
-            git_cmd + ["push", "origin", "main", "--force-with-lease"],
+            git_cmd + ["push", "origin", STANDALONE_UPDATE_BRANCH, "--force-with-lease"],
             cwd=cwd,
             capture_output=True,
             text=True,
@@ -6966,8 +6952,8 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
 
     This implements the fork upstream sync logic:
     - If upstream remote doesn't exist, ask user if they want to add it
-    - Compare origin/main with upstream/main
-    - If origin/main is strictly behind upstream/main, pull from upstream
+    - Compare origin/<update-branch> with upstream/<update-branch>
+    - If origin/<update-branch> is strictly behind upstream/<update-branch>, pull from upstream
     - Try to sync fork back to origin if possible
     """
     has_upstream = _has_upstream_remote(git_cmd, cwd)
@@ -6979,31 +6965,25 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
 
         # Ask user if they want to add upstream
         print()
-        print("ℹ Your fork is not tracking the official Hermes repository.")
-        print("  This means you may miss updates from NousResearch/hermes-agent.")
+        print("ℹ Your fork is not tracking the standalone Hermes repository.")
+        print(f"  This means you may miss updates from {STANDALONE_REPO_URL}.")
         print()
         try:
-            response = (
-                input("Add official repo as 'upstream' remote? [Y/n]: ").strip().lower()
-            )
+            response = input("Add standalone repo as 'upstream' remote? [Y/n]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             response = "n"
 
-        if response in {"", "y", "yes"}:
+        if response in ("", "y", "yes"):
             print("→ Adding upstream remote...")
             if _add_upstream_remote(git_cmd, cwd):
-                print(
-                    "  ✓ Added upstream: https://github.com/NousResearch/hermes-agent.git"
-                )
+                print(f"  ✓ Added upstream: {STANDALONE_REPO_URL}")
                 has_upstream = True
             else:
                 print("  ✗ Failed to add upstream remote. Skipping upstream sync.")
                 return
         else:
-            print(
-                "  Skipped. Run 'git remote add upstream https://github.com/NousResearch/hermes-agent.git' to add later."
-            )
+            print(f"  Skipped. Run 'git remote add upstream {STANDALONE_REPO_URL}' to add later.")
             _mark_skip_upstream_prompt()
             return
 
@@ -7021,23 +7001,23 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
         print("  ✗ Failed to fetch upstream. Skipping upstream sync.")
         return
 
-    # Compare origin/main with upstream/main
-    origin_ahead = _count_commits_between(git_cmd, cwd, "upstream/main", "origin/main")
-    upstream_ahead = _count_commits_between(
-        git_cmd, cwd, "origin/main", "upstream/main"
-    )
+    # Compare origin/<update-branch> with upstream/<update-branch>
+    upstream_ref = f"upstream/{STANDALONE_UPDATE_BRANCH}"
+    origin_ref = f"origin/{STANDALONE_UPDATE_BRANCH}"
+    origin_ahead = _count_commits_between(git_cmd, cwd, upstream_ref, origin_ref)
+    upstream_ahead = _count_commits_between(git_cmd, cwd, origin_ref, upstream_ref)
 
     if origin_ahead < 0 or upstream_ahead < 0:
         print("  ✗ Could not compare branches. Skipping upstream sync.")
         return
 
-    # If origin/main has commits not on upstream, don't trample
+    # If origin/<update-branch> has commits not on upstream, don't trample
     if origin_ahead > 0:
         print()
         print(f"ℹ Your fork has {origin_ahead} commit(s) not on upstream.")
         print("  Skipping upstream sync to preserve your changes.")
         print("  If you want to merge upstream changes, run:")
-        print("    git pull upstream main")
+        print(f"    git pull upstream {STANDALONE_UPDATE_BRANCH}")
         return
 
     # If upstream is not ahead, fork is up to date
@@ -7045,14 +7025,14 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
         print("  ✓ Fork is up to date with upstream")
         return
 
-    # origin/main is strictly behind upstream/main (can fast-forward)
+    # origin/<update-branch> is strictly behind upstream/<update-branch>
     print()
     print(f"→ Fork is {upstream_ahead} commit(s) behind upstream")
     print("→ Pulling from upstream...")
 
     try:
         subprocess.run(
-            git_cmd + ["pull", "--ff-only", "upstream", "main"],
+            git_cmd + ["pull", "--ff-only", "upstream", STANDALONE_UPDATE_BRANCH],
             cwd=cwd,
             check=True,
         )
@@ -8039,9 +8019,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 _cmd_update_pip(args)
                 return
             print("✗ Not a git repository. Please reinstall:")
-            print(
-                "  curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash"
-            )
+            print(f"  {standalone_install_command()}")
             sys.exit(1)
 
     # On Windows, git can fail with "unable to write loose object file: Invalid argument"
@@ -8080,15 +8058,17 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _update_via_zip(args)
         return
 
-    # Fetch and pull
+    # Fetch and align to the standalone release branch.
     try:
+        branch = STANDALONE_UPDATE_BRANCH
+        standalone_ref = standalone_update_ref(branch)
+        standalone_label = standalone_update_label(branch)
 
-        print("→ Fetching updates...")
-        fetch_result = subprocess.run(
-            git_cmd + ["fetch", "origin"],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
+        print(f"→ Fetching updates from {standalone_label}...")
+        fetch_result = fetch_standalone_update_ref(
+            git_cmd,
+            PROJECT_ROOT,
+            branch,
         )
         if fetch_result.returncode != 0:
             stderr = fetch_result.stderr.strip()
@@ -8102,7 +8082,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     "✗ Authentication failed — check your git credentials or SSH key."
                 )
             else:
-                print(f"✗ Failed to fetch updates from origin.")
+                print(f"✗ Failed to fetch updates from {standalone_label}.")
                 if stderr:
                     print(f"  {stderr.splitlines()[0]}")
             sys.exit(1)
@@ -8117,21 +8097,14 @@ def _cmd_update_impl(args, gateway_mode: bool):
         )
         current_branch = result.stdout.strip()
 
-        # Always update against main
-        branch = "main"
-
-        # If user is on a non-main branch or detached HEAD, switch to main
-        if current_branch != "main":
-            label = (
-                "detached HEAD"
-                if current_branch == "HEAD"
-                else f"branch '{current_branch}'"
-            )
-            print(f"  ⚠ Currently on {label} — switching to main for update...")
+        # If user is on a non-target branch or detached HEAD, switch first.
+        if current_branch != branch:
+            label = "detached HEAD" if current_branch == "HEAD" else f"branch '{current_branch}'"
+            print(f"  ⚠ Currently on {label} — switching to {branch} for update...")
             # Stash before checkout so uncommitted work isn't lost
             auto_stash_ref = _stash_local_changes_if_needed(git_cmd, PROJECT_ROOT)
             subprocess.run(
-                git_cmd + ["checkout", "main"],
+                git_cmd + ["checkout", branch],
                 cwd=PROJECT_ROOT,
                 capture_output=True,
                 text=True,
@@ -8148,7 +8121,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         # Check if there are updates
         result = subprocess.run(
-            git_cmd + ["rev-list", f"HEAD..origin/{branch}", "--count"],
+            git_cmd + ["rev-list", f"HEAD..{standalone_ref}", "--count"],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
@@ -8167,7 +8140,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     prompt_user=prompt_for_restore,
                     input_fn=gw_input_fn,
                 )
-            if current_branch not in {"main", "HEAD"}:
+            if current_branch not in (branch, "HEAD"):
                 subprocess.run(
                     git_cmd + ["checkout", current_branch],
                     cwd=PROJECT_ROOT,
@@ -8196,7 +8169,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             # Never let a snapshot failure block an update.
             logger.debug("Pre-update snapshot failed: %s", exc)
 
-        print("→ Pulling updates...")
+        print(f"→ Aligning local branch to {standalone_label}...")
         update_succeeded = False
         # Capture the pre-pull SHA so we can auto-roll-back if the new code
         # has a syntax error in a critical-path file (PR #28452 incident:
@@ -8205,18 +8178,20 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # the bad commit and the fix landing).
         pre_pull_sha = _capture_head_sha(git_cmd, PROJECT_ROOT)
         try:
-            pull_result = subprocess.run(
-                git_cmd + ["pull", "--ff-only", "origin", branch],
+            reset_result = subprocess.run(
+                git_cmd + ["reset", "--hard", standalone_ref],
                 cwd=PROJECT_ROOT,
                 capture_output=True,
                 text=True,
             )
-            if pull_result.returncode != 0:
-                # ff-only failed — local and remote have diverged (e.g. upstream
-                # force-pushed or rebase).  Since local changes are already
-                # stashed, reset to match the remote exactly.
+            if reset_result.returncode != 0:
+                print(f"✗ Failed to reset to {standalone_label}.")
+                if reset_result.stderr.strip():
+                    print(f"  {reset_result.stderr.strip()}")
                 print(
-                    "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
+                    "  Try manually: "
+                    f"git fetch {STANDALONE_REPO_URL} refs/heads/{branch}:{standalone_ref} "
+                    f"&& git reset --hard {standalone_ref}"
                 )
                 reset_result = subprocess.run(
                     git_cmd + ["reset", "--hard", f"origin/{branch}"],
@@ -8273,7 +8248,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     print("  Could not capture pre-pull SHA — recover manually with:")
                     print(f"    cd {PROJECT_ROOT} && git reflog && git reset --hard <prev-sha>")
                 sys.exit(1)
-
             update_succeeded = True
         finally:
             if auto_stash_ref is not None:
@@ -8304,8 +8278,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 f"  ✓ Cleared {removed} stale __pycache__ director{'y' if removed == 1 else 'ies'}"
             )
 
-        # Fork upstream sync logic (only for main branch on forks)
-        if is_fork and branch == "main":
+        # Fork upstream sync logic (only for the standalone update branch on forks)
+        if is_fork and branch == STANDALONE_UPDATE_BRANCH:
             _sync_with_upstream_if_needed(git_cmd, PROJECT_ROOT)
 
         # Reinstall Python dependencies. Prefer .[all], but if one optional extra
@@ -8363,8 +8337,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
 
         print()
         print("✓ Code updated!")
-
-        # After git pull, source files on disk are newer than cached Python
+        # After git reset to the fetched origin, source files on disk are newer than cached Python
         # modules in this process.  Reload hermes_constants so that any lazy
         # import executed below (skills sync, gateway restart) sees new
         # attributes like display_hermes_home() added since the last release.
@@ -8501,7 +8474,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 except EOFError:
                     response = "n"
 
-            if response in {"", "y", "yes", "auto"}:
+            if response in ("", "y", "yes", "auto"):
                 print()
                 # Gateway mode, --yes, and non-interactive update contexts
                 # (dashboard / web server actions) cannot prompt for API keys.
@@ -8582,7 +8555,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # update watcher would then poll for 30 minutes and send a spurious
         # timeout message.
         #
-        # Writing the marker here — after git pull + pip install succeed but
+        # Writing the marker here — after code sync + pip install succeed but
         # before we attempt the restart — ensures the new gateway sees it
         # regardless of how we die.
         if gateway_mode:
@@ -8593,7 +8566,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                 pass
 
         # Auto-restart ALL gateways after update.
-        # The code update (git pull) is shared across all profiles, so every
+        # The code update (git reset to origin) is shared across all profiles, so every
         # running gateway needs restarting to pick up the new code.
         try:
             from hermes_cli.gateway import (
@@ -9696,7 +9669,7 @@ def cmd_profile(args):
                         answer = input("\nProceed with install? [y/N] ").strip().lower()
                     except (EOFError, KeyboardInterrupt):
                         answer = ""
-                    if answer not in {"y", "yes"}:
+                    if answer not in ("y", "yes"):
                         print("Install cancelled.")
                         return
 
@@ -9755,7 +9728,7 @@ def cmd_profile(args):
                     answer = input("\nProceed? [y/N] ").strip().lower()
                 except (EOFError, KeyboardInterrupt):
                     answer = ""
-                if answer not in {"y", "yes"}:
+                if answer not in ("y", "yes"):
                     print("Update cancelled.")
                     return
 
@@ -11672,9 +11645,9 @@ Examples:
             mem_dir = get_hermes_home() / "memories"
             target = getattr(args, "target", "all")
             files_to_reset = []
-            if target in {"all", "memory"}:
+            if target in ("all", "memory"):
                 files_to_reset.append(("MEMORY.md", "agent notes"))
-            if target in {"all", "user"}:
+            if target in ("all", "user"):
                 files_to_reset.append(("USER.md", "user profile"))
 
             # Check what exists
@@ -11785,7 +11758,7 @@ Examples:
 
     def cmd_tools(args):
         action = getattr(args, "tools_action", None)
-        if action in {"list", "disable", "enable"}:
+        if action in ("list", "disable", "enable"):
             from hermes_cli.tools_config import tools_disable_enable_command
 
             tools_disable_enable_command(args)
@@ -12016,7 +11989,7 @@ Examples:
     def _confirm_prompt(prompt: str) -> bool:
         """Prompt for y/N confirmation, safe against non-TTY environments."""
         try:
-            return input(prompt).strip().lower() in {"y", "yes"}
+            return input(prompt).strip().lower() in ("y", "yes")
         except (EOFError, KeyboardInterrupt):
             return False
 
@@ -12698,6 +12671,8 @@ Examples:
         help="List running hermes dashboard processes and exit",
     )
     dashboard_parser.set_defaults(func=cmd_dashboard)
+
+    register_branch_cli_commands(subparsers)
 
     # =========================================================================
     # logs command

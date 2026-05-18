@@ -17,7 +17,9 @@ from gateway.platforms.base import (
     MessageType,
     PlatformConfig,
     Platform,
+    merge_pending_message_event,
 )
+from gateway.session import SessionSource, build_session_key
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +141,31 @@ class TestQueueMessageStorage:
         adapter._active_sessions[session_key].set()  # this is what handle_message does
 
         assert adapter.has_pending_interrupt(session_key)
+
+    @pytest.mark.asyncio
+    async def test_active_session_followups_append_in_pending_turn(self):
+        adapter = _StubAdapter()
+        adapter.set_message_handler(lambda event: asyncio.sleep(0, result=None))
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="123",
+            chat_type="dm",
+            user_id="user-1",
+        )
+        session_key = build_session_key(source)
+        adapter._active_sessions[session_key] = asyncio.Event()
+
+        await adapter.handle_message(
+            MessageEvent(text="first", message_type=MessageType.TEXT, source=source, message_id="m1")
+        )
+        await adapter.handle_message(
+            MessageEvent(text="second", message_type=MessageType.TEXT, source=source, message_id="m2")
+        )
+
+        pending = adapter.get_pending_message(session_key)
+        assert pending is not None
+        assert pending.text == "first\nsecond"
+        assert pending.message_id == "m2"
 
 
 class TestQueueConsumptionAfterCompletion:
@@ -361,3 +388,4 @@ class TestQueueConsumptionAfterCompletion:
             e.text for e in runner._queued_events[session_key]
         ]
         assert collected == texts
+

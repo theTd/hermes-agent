@@ -119,6 +119,7 @@ class GatewayStreamConsumer:
         metadata: Optional[dict] = None,
         on_new_message: Optional[callable] = None,
         initial_reply_to_id: Optional[str] = None,
+        promotion_protocol: Optional[dict] = None,
     ):
         self.adapter = adapter
         self.chat_id = chat_id
@@ -133,6 +134,7 @@ class GatewayStreamConsumer:
         # Called with no arguments. Exceptions are swallowed.
         self._on_new_message = on_new_message
         self._initial_reply_to_id = initial_reply_to_id
+        self._promotion_protocol = promotion_protocol if isinstance(promotion_protocol, dict) else None
         self._queue: queue.Queue = queue.Queue()
         self._accumulated = ""
         self._message_id: Optional[str] = None
@@ -643,9 +645,13 @@ class GatewayStreamConsumer:
     # Matches the simple cleanup regex used by the non-streaming path in
     # gateway/platforms/base.py for post-processing.
     _MEDIA_RE = re.compile(r'''[`"']?MEDIA:\s*\S+[`"']?''')
+    _COMPLEXITY_RE = re.compile(
+        r"\[\[\s*COMPLEXITY\s*:\s*(100|[1-9]?\d)\s*\]\]\s*",
+        flags=re.IGNORECASE,
+    )
 
-    @staticmethod
-    def _clean_for_display(text: str) -> str:
+    @classmethod
+    def _clean_for_display(cls, text: str, protocol: Optional[dict] = None) -> str:
         """Strip MEDIA: directives and internal markers from text before display.
 
         The streaming path delivers raw text chunks that may include
@@ -655,10 +661,19 @@ class GatewayStreamConsumer:
         stream finishes — we just need to hide the raw directives from the
         user.
         """
-        if "MEDIA:" not in text and "[[audio_as_voice]]" not in text:
+        if (
+            "MEDIA:" not in text
+            and "[[audio_as_voice]]" not in text
+            and (not protocol or "[[" not in text)
+        ):
             return text
         cleaned = text.replace("[[audio_as_voice]]", "")
-        cleaned = GatewayStreamConsumer._MEDIA_RE.sub("", cleaned)
+        cleaned = cls._MEDIA_RE.sub("", cleaned)
+        if protocol:
+            cleaned = cls._COMPLEXITY_RE.sub("", cleaned)
+            for marker in protocol.values():
+                if isinstance(marker, str) and marker:
+                    cleaned = cleaned.replace(marker, "")
         # Collapse excessive blank lines left behind by removed tags
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
         # Strip trailing whitespace/newlines but preserve leading content
@@ -669,7 +684,7 @@ class GatewayStreamConsumer:
 
         Returns the message_id so callers can thread subsequent chunks.
         """
-        text = self._clean_for_display(text)
+        text = self._clean_for_display(text, self._promotion_protocol)
         if not text.strip():
             return reply_to_id
         try:
@@ -700,7 +715,7 @@ class GatewayStreamConsumer:
         prefix = self._last_sent_text or ""
         if self.cfg.cursor and prefix.endswith(self.cfg.cursor):
             prefix = prefix[:-len(self.cfg.cursor)]
-        return self._clean_for_display(prefix)
+        return self._clean_for_display(prefix, self._promotion_protocol)
 
     def _continuation_text(self, final_text: str) -> str:
         """Return only the part of final_text the user has not already seen."""
@@ -735,7 +750,7 @@ class GatewayStreamConsumer:
 
         Retries each chunk once on flood-control failures with a short delay.
         """
-        final_text = self._clean_for_display(text)
+        final_text = self._clean_for_display(text, self._promotion_protocol)
         continuation = self._continuation_text(final_text)
         self._fallback_final_send = False
         if not continuation.strip():
@@ -998,7 +1013,7 @@ class GatewayStreamConsumer:
 
     async def _send_commentary(self, text: str) -> bool:
         """Send a completed interim assistant commentary message."""
-        text = self._clean_for_display(text)
+        text = self._clean_for_display(text, self._promotion_protocol)
         if not text.strip():
             return False
         try:
@@ -1110,7 +1125,7 @@ class GatewayStreamConsumer:
         # Strip MEDIA: directives so they don't appear as visible text.
         # Media files are delivered as native attachments after the stream
         # finishes (via _deliver_media_from_response in gateway/run.py).
-        text = self._clean_for_display(text)
+        text = self._clean_for_display(text, self._promotion_protocol)
         # A bare streaming cursor is not meaningful user-visible content and
         # can render as a stray tofu/white-box message on some clients.
         visible_without_cursor = text

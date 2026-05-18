@@ -64,6 +64,7 @@ def _make_runner():
     runner._running_agents_ts = {}
     runner._pending_messages = {}
     runner._busy_ack_ts = {}
+    runner._busy_input_mode = "interrupt"
     runner._draining = False
     runner.adapters = {}
     runner.config = MagicMock()
@@ -315,6 +316,42 @@ class TestBusySessionAck:
         assert agent.interrupt.call_count == 2
 
     @pytest.mark.asyncio
+    async def test_queue_mode_queues_without_interrupt(self):
+        """Queue mode should preserve the running task and queue the follow-up."""
+        runner, sentinel = _make_runner()
+        runner._busy_input_mode = "queue"
+        adapter = _make_adapter()
+
+        event = _make_event(text="queue this")
+        sk = build_session_key(event.source)
+
+        agent = MagicMock()
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 7,
+            "max_iterations": 60,
+            "current_tool": "terminal",
+            "last_activity_ts": time.time(),
+            "last_activity_desc": "terminal",
+            "seconds_since_activity": 0.5,
+        }
+        runner._running_agents[sk] = agent
+        runner._running_agents_ts[sk] = time.time() - 120
+        runner.adapters[event.source.platform] = adapter
+
+        result = await runner._handle_active_session_busy_message(event, sk)
+
+        assert result is True
+        agent.interrupt.assert_not_called()
+        assert sk in adapter._pending_messages
+        assert adapter._pending_messages[sk].text == "queue this"
+
+        adapter._send_with_retry.assert_called_once()
+        call_kwargs = adapter._send_with_retry.call_args
+        content = call_kwargs.kwargs.get("content") or call_kwargs[1].get("content", "")
+        assert "Queued your message for the next turn." in content
+        assert "Interrupting current task" not in content
+
+    @pytest.mark.asyncio
     async def test_ack_after_cooldown_expires(self):
         """After 30s cooldown, a new message should send a fresh ack."""
         runner, sentinel = _make_runner()
@@ -378,6 +415,66 @@ class TestBusySessionAck:
         assert "21/60" in content  # iteration
         assert "terminal" in content  # current tool
         assert "10 min" in content  # elapsed
+
+    @pytest.mark.asyncio
+    async def test_progress_query_replies_with_running_agent_status_without_interrupt(self):
+        """Status-style queries during a running task should return live status, not queue/interrupt."""
+        runner, sentinel = _make_runner()
+        adapter = _make_adapter()
+
+        event = _make_event(text="跑到哪了")
+        sk = build_session_key(event.source)
+
+        agent = MagicMock()
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 4,
+            "max_iterations": 10,
+            "current_tool": "terminal",
+            "last_activity_desc": "Inspecting gateway flow",
+            "seconds_since_activity": 0.5,
+        }
+        runner._running_agents[sk] = agent
+        runner._running_agents_ts[sk] = time.time() - 120
+        runner.adapters[event.source.platform] = adapter
+
+        result = await runner._handle_active_session_busy_message(event, sk)
+
+        assert result is True
+        agent.interrupt.assert_not_called()
+        assert sk not in adapter._pending_messages
+        adapter._send_with_retry.assert_called_once()
+        content = adapter._send_with_retry.call_args.kwargs.get("content", "")
+        assert "Still working on the current request." in content
+        assert "Current step: iteration 4/10." in content
+        assert "Current tool: terminal." in content
+        assert "Latest progress: Inspecting gateway flow." in content
+
+    @pytest.mark.asyncio
+    async def test_adapter_can_suppress_non_llm_busy_ack_messages(self):
+        runner, sentinel = _make_runner()
+        adapter = _make_adapter(platform_val="napcat")
+        adapter.EMIT_NON_LLM_STATUS_MESSAGES = False
+
+        event = _make_event(text="继续处理这个", platform_val="napcat")
+        sk = build_session_key(event.source)
+
+        agent = MagicMock()
+        agent.get_activity_summary.return_value = {
+            "api_call_count": 4,
+            "max_iterations": 10,
+            "current_tool": "terminal",
+            "last_activity_desc": "Inspecting gateway flow",
+            "seconds_since_activity": 0.5,
+        }
+        runner._running_agents[sk] = agent
+        runner._running_agents_ts[sk] = time.time() - 120
+        runner.adapters[event.source.platform] = adapter
+
+        result = await runner._handle_active_session_busy_message(event, sk)
+
+        assert result is True
+        agent.interrupt.assert_called_once_with("继续处理这个")
+        adapter._send_with_retry.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_draining_still_works(self):
